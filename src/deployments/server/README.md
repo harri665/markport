@@ -135,7 +135,7 @@ server {
 
 ### Proxy in another container (Traefik, Nginx Proxy Manager, ...)
 
-In `docker-compose.yaml`, remove the `ports:` block, uncomment the `networks:` lines and
+In `docker-compose.yml`, remove the `ports:` block, uncomment the `networks:` lines and
 set the external network name to your proxy's. Then route to
 `http://markport:3500`. Enable the proxy's own auth (Traefik `basicauth`
 middleware, an NPM access list, Authelia/Authentik, ...).
