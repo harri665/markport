@@ -1,0 +1,15 @@
+{
+  "name": "markport",
+  "private": true,
+  "license": "GPL-3.0-only",
+  "description": "Local run/test entry points. The packages under src/ keep their own package.json; this file has no dependencies.",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "setup": "node scripts/dev.js setup",
+    "dev": "node scripts/dev.js dev",
+    "start": "node scripts/dev.js start",
+    "test": "node scripts/dev.js test"
+  }
+}
