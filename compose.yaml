@@ -17,7 +17,7 @@ services:
     container_name: markport
     restart: unless-stopped
     ports:
-      - "${MARKPORT_BIND:-127.0.0.1}:${MARKPORT_PORT:-3000}:3000"
+      - "${MARKPORT_BIND:-127.0.0.1}:${MARKPORT_PORT:-3500}:3500"
     environment:
       DEFAULT_VAULT_NAME: ${DEFAULT_VAULT_NAME:-Notes}
       VAULT_PATH: /data/vaults/${DEFAULT_VAULT_NAME:-Notes}
@@ -26,7 +26,7 @@ services:
       - ${MARKPORT_DATA:-markport-data}:/data
     # If your proxy runs as a container on a shared Docker network instead of
     # on the host, uncomment this, drop the `ports:` block above, and point the
-    # proxy at http://markport:3000.
+    # proxy at http://markport:3500.
     # networks: [proxy]
 
 volumes:

@@ -56,7 +56,7 @@ The client-only deployment (and local/folder vaults on the Node server) are back
 | Persistence | Full | Until you clear this site's browsing data |
 | Sharing | Whoever can reach the server/port | Nobody - your vault stays private to your browser; only GitHub/obsidian.md requests (plugin installs, plus one automatic check on vault load) pass through a small proxy, see "Cloudflare (client-only) deployment" below |
 | Use case | Personal use, self-hosted | Static hosting, zero maintenance, no server-side vault storage |
-| URL | `http://localhost:3000` | wherever you deploy it |
+| URL | `http://localhost:3500` | wherever you deploy it |
 
 The app profile and the demo profile come from **one build**. `scripts/build-assets.sh` picks a config profile
 from the `OW_PROFILE` environment variable - the default profile ships the app (no demo vault, no
@@ -133,7 +133,7 @@ For production (no reload overhead):
 npm start
 ```
 
-Open `http://127.0.0.1:3000`. `/mobile` also works (backwards-compatible alias, same page).
+Open `http://127.0.0.1:3500`. `/mobile` also works (backwards-compatible alias, same page).
 `/starter` (the old desktop vault picker) returns the same app shell as `/` on the Node
 server - `GET /starter` is a 200, not a redirect - so existing bookmarks/links still land
 you on the app instead of a 404. The client-only Cloudflare deployment serves `/starter`
@@ -175,7 +175,7 @@ This script downloads the official APK and unpacks the `assets/public/` tree to 
 
 Server environment variables:
 
-- `PORT`: HTTP port, default `3000`.
+- `PORT`: HTTP port, default `3500`.
 - `HOST`: bind address, default `127.0.0.1`.
 - `VAULT_PATH`: vault path relative to the project root or absolute, default `user-data/demo-vault`.
 - `VAULT_REGISTRY`: recent-vault registry JSON path, default `user-data/registry.json`.
@@ -273,7 +273,7 @@ Browser
 
 ## Node.js deployment
 
-**Docker Compose:** `docker compose up -d --build` from the repo root builds an image (downloading Obsidian's renderer during the build) and serves the app on `127.0.0.1:3000`, with vaults on a Docker volume. Reverse-proxy setup, vault management and backups: [`src/deployments/server/README.md`](src/deployments/server/README.md).
+**Docker Compose:** `docker compose up -d --build` from the repo root builds an image (downloading Obsidian's renderer during the build) and serves the app on `127.0.0.1:3500`, with vaults on a Docker volume. Reverse-proxy setup, vault management and backups: [`src/deployments/server/README.md`](src/deployments/server/README.md).
 
 Without Docker, the Node.js server (`src/runtime-server/server/`) can be deployed to any Linux box. A typical setup:
 

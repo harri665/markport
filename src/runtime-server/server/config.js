@@ -15,7 +15,7 @@ const crypto = require('crypto');
 const fsSync = require('fs');
 
 function parsePort(raw) {
-  if (!raw) return 3000;
+  if (!raw) return 3500;
   const n = parseInt(raw, 10);
   if (!Number.isFinite(n) || n < 1 || n > 65535) {
     throw new Error(`Invalid PORT value: "${raw}". Must be an integer between 1 and 65535.`);
@@ -85,7 +85,7 @@ module.exports = {
   watchPolling: process.env.WATCH_POLLING === 'true',
   watchPollInterval: process.env.WATCH_POLL_INTERVAL
     ? parseInt(process.env.WATCH_POLL_INTERVAL, 10)
-    : 3000,
+    : 3500,
   bootstrap: {
     // Master switch. When false, /api/bootstrap returns { disabled: true }
     // immediately without scanning the vault. Useful for minimal deployments

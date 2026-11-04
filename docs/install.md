@@ -43,7 +43,7 @@ npm install
 npm start
 ```
 
-Open `http://127.0.0.1:3000`.
+Open `http://127.0.0.1:3500`.
 
 `npm run dev` instead of `npm start` reloads on file changes.
 
@@ -51,7 +51,7 @@ Open `http://127.0.0.1:3000`.
 
 | Variable | Default | |
 |---|---|---|
-| `PORT` | `3000` | |
+| `PORT` | `3500` | |
 | `HOST` | `127.0.0.1` | set to `0.0.0.0` to accept connections from other machines |
 | `VAULT_PATH` | `user-data/demo-vault` | the vault directory to serve |
 

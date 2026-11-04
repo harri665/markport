@@ -141,14 +141,14 @@ module.exports = MyPlugin;
 
 ```bash
 # 1. בדוק שהמשרת מזהה את הפלאגין:
-curl -s http://localhost:3000/api/fs/readdir?path=.obsidian/plugins | jq '.[].name'
+curl -s http://localhost:3500/api/fs/readdir?path=.obsidian/plugins | jq '.[].name'
 # צריך לכלול "markport-<name>"
 
 # 2. בדוק שה-manifest מוגש:
-curl -s "http://localhost:3000/api/fs/read?path=.obsidian/plugins/markport-<name>/manifest.json"
+curl -s "http://localhost:3500/api/fs/read?path=.obsidian/plugins/markport-<name>/manifest.json"
 
 # 3. בדוק שה-id מופיע ב-community-plugins.json הוירטואלי:
-curl -s "http://localhost:3000/api/fs/read?path=.obsidian/community-plugins.json"
+curl -s "http://localhost:3500/api/fs/read?path=.obsidian/community-plugins.json"
 # צריך להחזיר array שמכיל "markport-<name>"
 
 # 4. בדפדפן (אחרי reload):

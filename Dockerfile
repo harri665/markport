@@ -51,16 +51,16 @@ RUN mkdir -p /data/vaults && chown -R node:node /data
 VOLUME /data
 
 ENV HOST=0.0.0.0 \
-    PORT=3000 \
+    PORT=3500 \
     VAULTS_DIR=/data/vaults \
     DEFAULT_VAULT_NAME=Notes \
     VAULT_PATH=/data/vaults/Notes \
     VAULT_REGISTRY=/data/registry.json
 
 USER node
-EXPOSE 3000
+EXPOSE 3500
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-  CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||3000)+'/api/vaults/list').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"
+  CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||3500)+'/api/vaults/list').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"
 
 WORKDIR /app/src/runtime-server/server
 CMD ["node", "index.js"]

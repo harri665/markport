@@ -148,18 +148,18 @@ automatically.
 
 ### 6. Verify
 
-The server listens on port 3000 by default (`PORT` overrides it).
+The server listens on port 3500 by default (`PORT` overrides it).
 
 ```bash
 # 1. the server sees the plugin
-curl -s "http://localhost:3000/api/fs/readdir?path=.obsidian/plugins" | jq '.[].name'
+curl -s "http://localhost:3500/api/fs/readdir?path=.obsidian/plugins" | jq '.[].name'
 # should include "markport-<name>"
 
 # 2. the manifest is served
-curl -s "http://localhost:3000/api/fs/read?path=.obsidian/plugins/markport-<name>/manifest.json"
+curl -s "http://localhost:3500/api/fs/read?path=.obsidian/plugins/markport-<name>/manifest.json"
 
 # 3. the id appears in the virtual community-plugins.json
-curl -s "http://localhost:3000/api/fs/read?path=.obsidian/community-plugins.json"
+curl -s "http://localhost:3500/api/fs/read?path=.obsidian/community-plugins.json"
 # should return an array containing "markport-<name>"
 
 # 4. in the browser, after a reload

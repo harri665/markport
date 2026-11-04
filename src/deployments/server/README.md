@@ -26,7 +26,7 @@ docker compose up -d --build
 docker compose logs -f      # "[vaults] 1 vault(s) in /data/vaults" then "Listening on ..."
 ```
 
-The app is now on `http://127.0.0.1:3000` on the server. Point your proxy at it.
+The app is now on `http://127.0.0.1:3500` on the server. Point your proxy at it.
 On first start a vault named `Notes` (from `DEFAULT_VAULT_NAME`) is created and
 shown on the start screen.
 
@@ -103,7 +103,7 @@ notes.example.com {
 		# caddy hash-password --plaintext 'your-password'
 		alice $2a$14$REPLACE_WITH_HASH
 	}
-	reverse_proxy 127.0.0.1:3000
+	reverse_proxy 127.0.0.1:3500
 }
 ```
 
@@ -123,7 +123,7 @@ server {
     client_max_body_size 256m;
 
     location / {
-        proxy_pass         http://127.0.0.1:3000;
+        proxy_pass         http://127.0.0.1:3500;
         proxy_http_version 1.1;
         proxy_set_header   Upgrade $http_upgrade;
         proxy_set_header   Connection "upgrade";
@@ -137,12 +137,12 @@ server {
 
 In `compose.yaml`, remove the `ports:` block, uncomment the `networks:` lines and
 set the external network name to your proxy's. Then route to
-`http://markport:3000`. Enable the proxy's own auth (Traefik `basicauth`
+`http://markport:3500`. Enable the proxy's own auth (Traefik `basicauth`
 middleware, an NPM access list, Authelia/Authentik, ...).
 
 ### Cloudflare Tunnel
 
-Point the tunnel at `http://127.0.0.1:3000` (or `http://markport:3000` on a
+Point the tunnel at `http://127.0.0.1:3500` (or `http://markport:3500` on a
 shared network) and protect the hostname with a Cloudflare Access policy.
 WebSockets work through tunnels without extra settings.
 
@@ -151,7 +151,7 @@ WebSockets work through tunnels without extra settings.
 | Variable | Default | Meaning |
 |---|---|---|
 | `MARKPORT_BIND` | `127.0.0.1` | host interface to publish on |
-| `MARKPORT_PORT` | `3000` | host port |
+| `MARKPORT_PORT` | `3500` | host port |
 | `MARKPORT_DATA` | `markport-data` | named volume, or a host path |
 | `DEFAULT_VAULT_NAME` | `Notes` | vault created when there is none |
 | `WATCH_POLLING` | `false` | `true` for network filesystems |
