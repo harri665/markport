@@ -1,0 +1,4 @@
+# Everything in this directory is generated/intermediate.
+# Only the .gitignore itself is tracked, ensuring the folder exists in fresh clones.
+*
+!.gitignore

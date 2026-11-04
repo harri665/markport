@@ -1,0 +1,9 @@
+{
+  "id": "obsidian-web-layout",
+  "name": "Markport — Layout Switcher",
+  "version": "0.1.0",
+  "minAppVersion": "1.0.0",
+  "description": "Switch between desktop, mobile, and auto-detect layouts. Only visible on Markport (the web wrapper).",
+  "author": "Markport",
+  "isDesktopOnly": false
+}

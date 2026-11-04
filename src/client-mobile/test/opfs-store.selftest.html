@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>opfs-store self-test</title>
+  <style>
+    body { font: 13px/1.5 -apple-system, BlinkMacSystemFont, monospace, sans-serif; background: #1e1e1e; color: #ddd; margin: 0; padding: 16px; }
+    #summary { font-weight: bold; font-size: 16px; margin-bottom: 12px; }
+    #summary.pass { color: #4caf50; }
+    #summary.fail { color: #f44336; }
+    .pass-line { color: #4caf50; }
+    .fail-line { color: #f44336; font-weight: bold; }
+    pre#out { white-space: pre-wrap; word-break: break-word; }
+  </style>
+</head>
+<body>
+  <h1>opfs-store self-test</h1>
+  <div id="summary">Running…</div>
+  <pre id="out"></pre>
+
+  <!-- Module under test — sole external dependency of this page. -->
+  <script src="/client-mobile/storage/opfs-store.js"></script>
+  <script>
+    (async function () {
+      const out = document.getElementById('out');
+      const summary = document.getElementById('summary');
+      let passCount = 0;
+      let failCount = 0;
+
+      function log(ok, label) {
+        const line = document.createElement('div');
+        line.className = ok ? 'pass-line' : 'fail-line';
+        line.textContent = (ok ? 'PASS — ' : 'FAIL — ') + label;
+        out.appendChild(line);
+        if (ok) passCount++; else failCount++;
+      }
+
+      function assert(cond, label) {
+        log(!!cond, label);
+        if (!cond) console.error('[opfs-store selftest] FAIL:', label);
+      }
+
+      async function assertThrows(fn, label) {
+        let threw = false;
+        try { await fn(); } catch (_) { threw = true; }
+        assert(threw, label);
+      }
+
+      try {
+        if (!window.__owOpfsStore || typeof window.__owOpfsStore.makeStore !== 'function') {
+          throw new Error('window.__owOpfsStore.makeStore is not a function — module failed to load');
+        }
+        if (!navigator.storage || typeof navigator.storage.getDirectory !== 'function') {
+          throw new Error('navigator.storage.getDirectory unavailable — OPFS not supported in this browser');
+        }
+
+        const s = window.__owOpfsStore.makeStore('selftest-vault');
+
+        // Cleanup — idempotent, so repeated runs of this page start clean.
+        try {
+          const r = await navigator.storage.getDirectory();
+          const v = await r.getDirectoryHandle('vaults');
+          await v.removeEntry('selftest-vault', { recursive: true });
+        } catch (_) { /* first run — nothing to clean */ }
+
+        // 1. mkdir + write + read (utf8)
+        await s.mkdir({ path: 'Notes', recursive: false });
+        await s.writeFile({ path: 'Notes/hello.md', data: 'Hi', encoding: 'utf8' });
+        assert((await s.readFile({ path: 'Notes/hello.md', encoding: 'utf8' })).data === 'Hi', 'utf8 roundtrip');
+
+        // 2. readdir
+        const list = await s.readdir({ path: 'Notes' });
+        assert(list.files.length === 1 && list.files[0].name === 'hello.md', 'readdir leaf name');
+
+        // 3. binary roundtrip (כולל NUL)
+        const bin = btoa('hello\x00world');
+        await s.writeFile({ path: 'bin.dat', data: bin }); // אין encoding → binary/base64
+        assert((await s.readFile({ path: 'bin.dat' })).data === bin, 'binary base64 roundtrip');
+
+        // 4. write לנתיב עמוק יוצר תיקיות-אב חסרות
+        await s.writeFile({ path: 'A/B/C/deep.md', data: 'x', encoding: 'utf8' });
+        assert((await s.readFile({ path: 'A/B/C/deep.md', encoding: 'utf8' })).data === 'x', 'auto-mkdir parents on write');
+
+        // 5. stat
+        const st = await s.stat({ path: 'Notes/hello.md' });
+        assert(st.type === 'file' && st.size === 2, 'stat file');
+        assert((await s.stat({ path: 'Notes' })).type === 'directory', 'stat dir');
+
+        // 6. rename (copy+delete)
+        await s.rename({ from: 'Notes/hello.md', to: 'Notes/renamed.md' });
+        assert((await s.readFile({ path: 'Notes/renamed.md', encoding: 'utf8' })).data === 'Hi', 'rename dest exists');
+        let gone = false;
+        try { await s.readFile({ path: 'Notes/hello.md', encoding: 'utf8' }); } catch (e) { gone = e.code === 'ENOENT' || true; }
+        assert(gone, 'rename source removed');
+
+        // 7. copy
+        await s.copy({ from: 'Notes/renamed.md', to: 'Notes/copy.md' });
+        assert((await s.readFile({ path: 'Notes/copy.md', encoding: 'utf8' })).data === 'Hi', 'copy');
+
+        // 8. delete
+        await s.deleteFile({ path: 'bin.dat' });
+        let del = false;
+        try { await s.readFile({ path: 'bin.dat' }); } catch (e) { del = true; }
+        assert(del, 'deleteFile');
+
+        // 9. ★★★ watchAndStatAll — FLAT list עם נתיבים מלאים (ה-bug הקריטי מ-2026-05-12) ★★★
+        const tree = await s.watchAndStatAll({});
+        const names = tree.children.map(e => e.name);
+        assert(names.includes('Notes'), 'flat: top-level dir');
+        assert(names.includes('Notes/renamed.md'), 'flat: nested file full path');
+        assert(names.includes('A/B/C/deep.md'), 'flat: deeply nested file full path');
+        assert(names.includes('A/B/C'), 'flat: deeply nested dir full path');
+        assert(tree.children.every(e => e.children === undefined), 'entries MUST be flat (no children prop)');
+
+        // 10. no-op watch API לא זורק
+        await s.startWatch({});
+        await s.stopWatch({});
+        const h = await s.addListener('change', () => {});
+        assert(typeof h.remove === 'function', 'addListener returns remove');
+
+        // 11. appendFile — byte-append מדויק (הנתיב של LiveSync ל-chunks בינאריים)
+        await s.writeFile({ path: 'log.bin', data: btoa('AAA') }); // base64 של "AAA"
+        await s.appendFile({ path: 'log.bin', data: btoa('BBB') }); // append "BBB"
+        assert((await s.readFile({ path: 'log.bin' })).data === btoa('AAABBB'), 'appendFile = old ⧺ new (exact)');
+        // appendFile על קובץ חסר = יצירה (כולל תיקיות-אב)
+        await s.appendFile({ path: 'D/E/new.bin', data: btoa('Z') });
+        assert((await s.readFile({ path: 'D/E/new.bin' })).data === btoa('Z'), 'appendFile creates missing file + parents');
+
+        // 12. getUri — blob URL שנטען ומחזיר את התוכן
+        const { uri } = await s.getUri({ path: 'Notes/renamed.md' });
+        assert(typeof uri === 'string' && uri.startsWith('blob:'), 'getUri returns blob: URL');
+        assert((await (await fetch(uri)).text()) === 'Hi', 'getUri blob resolves to file content');
+
+        // 13. getUri על שורש לא זורק ומחזיר uri string (המקרה שאובסידיאן קורא ב-vault-open)
+        const rootUri = await s.getUri({ path: '' });
+        assert(rootUri && typeof rootUri.uri === 'string' && rootUri.uri.length > 0, 'getUri("") returns non-empty uri, no throw');
+        // 14. getUri על תיקייה לא זורק
+        const dirUri = await s.getUri({ path: 'Notes' });
+        assert(dirUri && typeof dirUri.uri === 'string' && dirUri.uri.length > 0, 'getUri(dir) returns uri, no throw');
+        // 15. getUri על קובץ עדיין blob (רגרסיה לassertion 12)
+        const fileUri = await s.getUri({ path: 'Notes/renamed.md' });
+        assert(fileUri.uri.startsWith('blob:'), 'getUri(file) still blob: URL');
+
+      } catch (err) {
+        failCount++;
+        const line = document.createElement('div');
+        line.className = 'fail-line';
+        line.textContent = 'FAIL — unexpected exception: ' + (err && err.message || err);
+        out.appendChild(line);
+        console.error('[opfs-store selftest] unexpected exception', err);
+      }
+
+      if (failCount === 0) {
+        summary.textContent = 'ALL PASS (' + passCount + ')';
+        summary.className = 'pass';
+      } else {
+        summary.textContent = 'FAILED: ' + failCount + ' (passed ' + passCount + ')';
+        summary.className = 'fail';
+      }
+    })();
+  </script>
+</body>
+</html>

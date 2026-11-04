@@ -1,0 +1,77 @@
+/**
+ * overrides.css
+ *
+ * CSS-only overrides על גבי הבאנדל הנייטיב (vendor/obsidian-mobile/app.css) —
+ * מטרה: על מסך רחב (720-899px, מתחת לסף layout-switch של 900 — ראה
+ * client-mobile/boot.js) הכפתורים בפריסת-המובייל רחוקים זה מזה, כי המסכים
+ * הנייטיביים (onboarding/chooser) ממורכזים אבל עדיין רחבים/עם ניווט בפינה.
+ * ראה the mobile-layout-wide brief.
+ *
+ * לא נוגע בבאנדל, ב-JS, או בלוגיקת isPhone/layout — CSS בלבד, נטען **אחרי**
+ * app.css ב-index.html (order + specificity גוברים).
+ *
+ * ── ממצאי spike (dev preview, ~800px, Chromium headless) ────────────────────
+ * (1) `.mobile-vault-chooser-content` — מסך "Obsidian" (רשימת vaults/Create
+ *     new vault/Open folder). כבר ממורכז (`margin:0 auto`) אבל max-width:800px
+ *     → ברוחב 800-1280 השורות פרושות מקצה לקצה. תוקן ל-480px.
+ * (2) `.mobile-onboarding-navbar .back-button` — מסך נפרד (onboarding/setup,
+ *     למשל "Where is your vault located?"). ה-navbar עצמו הוא
+ *     `position:fixed; width:100%` (לא ה-back-button) — לכן back נשאר בפינה
+ *     השמאלית-העליונה גם כש-`.mobile-onboarding-screen` הפנימי כבר ממורכז
+ *     ל-540px. מדידה אמפירית ב-800px: back היה ב-x=40 בעוד תוכן ב-x≈154 (פער
+ *     ~114px). תוקן ע"י מיקום ה-navbar עצמו (`max-width:540` תואם ל-
+ *     `.mobile-onboarding-screen`, עם `left:0;right:0;margin:0 auto` —
+ *     נדרש כי `margin:auto` על position:fixed לא ממרכז בלי left/right
+ *     מפורשים) — אחרי התיקון: navbar ב-x≈130, back ב-x≈170, תוכן ב-x≈154.5
+ *     (פער ~15.5px, סמוך). נבדק גם ב-1280px — מרכוז יחסי, לא ערך-קבוע.
+ * (3) סף media: 720px (לא 900) — 900 הוא סף layout-switch (boot.js,
+ *     isMobile↔desktop). ב-720-899 עדיין mobile layout; ב-390 (פלאפון) המדיה
+ *     לא חלה כלל — ללא שינוי.
+ * (4) `.mobile-onboarding-screen` (540) — כבר ממורכז כראוי ב-1280 בלי צורך
+ *     בצמצום נוסף; הבעיה הייתה רק ה-navbar החיצוני-לו.
+ */
+
+/*
+ * ── folder-refresh button spin (docs/plans/folder-refresh-toolbar.md §3ג) ──
+ * `.ow-folder-refresh-btn` is injected into the file-explorer's own
+ * nav-buttons-container (boot.js, installFolderRefreshWatch). While a rescan
+ * is in flight the button gets `.is-spinning` — this rotates its icon.
+ *
+ * REUSE, no new @keyframes: `ow-spin` is already defined in index.html:44
+ * for the boot loading-spinner. @keyframes names are document-global —
+ * redefining `ow-spin` here would silently override that spinner too
+ * (avigail finding 2, regression risk). The rotate-360 shape is identical,
+ * so we just reference the existing name.
+ */
+.ow-folder-refresh-btn.is-spinning svg {
+  animation: ow-spin 0.6s linear infinite;
+}
+
+/*
+ * ── "Sync now" button spin (the pull-sync brief §2/§3ד) ──
+ * `.ow-sync-now-btn` (boot.js, installSyncNowTrigger) — same reuse of the
+ * `ow-spin` keyframes as the folder-refresh button above, same rationale
+ * (document-global @keyframes name, don't redefine it here).
+ */
+.ow-sync-now-btn.is-spinning svg {
+  animation: ow-spin 0.6s linear infinite;
+}
+
+@media (min-width: 720px) {
+  /* מסך vault-chooser ("Obsidian" / רשימת vaults) — צמצום מ-800 ל-480 כדי
+     שהשורות (Setup Sync / Create new vault / vaults קיימים) לא יפרשו מקצה
+     לקצה על מסך רחב. */
+  .mobile-vault-chooser-content {
+    max-width: 480px;
+  }
+
+  /* מסכי onboarding/setup (למשל "Where is your vault located?") — מרכוז
+     ה-navbar (position:fixed) לרוחב-התוכן (540, זהה ל-.mobile-onboarding-screen)
+     כדי ש-"Back" ישב סמוך לתוכן במקום בפינת-המסך. */
+  .mobile-onboarding-navbar {
+    max-width: 540px;
+    left: 0;
+    right: 0;
+    margin: 0 auto;
+  }
+}

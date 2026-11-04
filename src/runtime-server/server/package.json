@@ -1,0 +1,19 @@
+{
+  "name": "obsidian-web-server",
+  "version": "0.2.0",
+  "license": "GPL-3.0-only",
+  "description": "HTTP/WebSocket backend for Obsidian web wrapper",
+  "main": "index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "chokidar": "^3.6.0",
+    "compression": "^1.8.1",
+    "express": "^4.21.0",
+    "ws": "^8.18.0"
+  }
+}

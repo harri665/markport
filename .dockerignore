@@ -1,0 +1,15 @@
+# Keep the build context to what the Dockerfile copies.
+# vendor/ is rebuilt inside the image; local vaults and caches never go in.
+.git
+**/node_modules
+vendor
+.tmp
+user-data
+data
+site
+docs
+docs-private
+reports
+.worktrees
+.env
+*.log

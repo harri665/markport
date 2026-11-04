@@ -1,0 +1,37 @@
+# Markport behind your own reverse proxy.
+#
+#   cp .env.example .env    # optional - every setting has a default
+#   docker compose up -d --build
+#
+# The app has no login of its own. By default it is published on 127.0.0.1
+# only, for a reverse proxy on the same host to forward to. Put authentication
+# and HTTPS in that proxy. See src/deployments/server/README.md.
+
+services:
+  markport:
+    build:
+      context: .
+      args:
+        OBSIDIAN_VERSION: ${OBSIDIAN_VERSION:-1.12.7}
+    image: markport:local
+    container_name: markport
+    restart: unless-stopped
+    ports:
+      - "${MARKPORT_BIND:-127.0.0.1}:${MARKPORT_PORT:-3000}:3000"
+    environment:
+      DEFAULT_VAULT_NAME: ${DEFAULT_VAULT_NAME:-Notes}
+      VAULT_PATH: /data/vaults/${DEFAULT_VAULT_NAME:-Notes}
+      WATCH_POLLING: ${WATCH_POLLING:-false}
+    volumes:
+      - ${MARKPORT_DATA:-markport-data}:/data
+    # If your proxy runs as a container on a shared Docker network instead of
+    # on the host, uncomment this, drop the `ports:` block above, and point the
+    # proxy at http://markport:3000.
+    # networks: [proxy]
+
+volumes:
+  markport-data:
+
+# networks:
+#   proxy:
+#     external: true

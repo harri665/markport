@@ -1,0 +1,5 @@
+# Runtime — contains local absolute paths to user's vaults
+registry.json
+
+# Demo vault — track content, ignore Obsidian's local state
+demo-vault/.obsidian/

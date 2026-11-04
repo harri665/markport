@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"/>
+  <title>New local vault — Markport</title>
+  <style>
+    body {
+      margin: 0; padding: 24px;
+      background: #1e1e1e; color: #dcddde;
+      font: 14px -apple-system, BlinkMacSystemFont, sans-serif;
+    }
+    h1 { font-size: 18px; margin: 0 0 16px; }
+    .row { display: flex; gap: 8px; margin-bottom: 24px; }
+    input {
+      flex: 1; padding: 8px 10px;
+      background: #2a2a2a; color: #dcddde;
+      border: 1px solid #444; border-radius: 4px;
+    }
+    button {
+      padding: 8px 16px;
+      background: #7f6df2; color: #fff;
+      border: none; border-radius: 4px; cursor: pointer;
+    }
+    button:hover { background: #8b7bf5; }
+    ul { list-style: none; padding: 0; margin: 0; }
+    li { border-bottom: 1px solid #333; }
+    li a {
+      display: block; padding: 10px 4px;
+      color: #dcddde; text-decoration: none;
+    }
+    li a:hover { background: #2a2a2a; }
+    .empty { color: #888; padding: 8px 4px; }
+  </style>
+</head>
+<body>
+
+  <h1>Local vaults (OPFS)</h1>
+
+  <div class="row">
+    <input id="ow-name" type="text" placeholder="Vault name" />
+    <button id="ow-create">Create local vault</button>
+  </div>
+
+  <div class="row" id="ow-folder-row" style="display:none">
+    <button id="ow-open-folder">Open a folder as vault</button>
+  </div>
+
+  <ul id="ow-list"></ul>
+
+  <script src="/client-mobile/local-vault-registry.js?v=1"></script>
+  <script src="/client-mobile/storage/folder-handle-store.js?v=1"></script>
+  <script>
+  (function () {
+    'use strict';
+
+    function render() {
+      var listEl = document.getElementById('ow-list');
+      var vaults = window.__owLocalVaults.list();
+      if (!vaults.length) {
+        listEl.innerHTML = '<li class="empty">No local vaults yet.</li>';
+        return;
+      }
+      listEl.innerHTML = '';
+      vaults.forEach(function (v) {
+        var li = document.createElement('li');
+        var a = document.createElement('a');
+        a.href = '/vault/' + encodeURIComponent(v.id);
+        a.textContent = v.name + (v.type === 'folder' ? ' (folder)' : '');
+        li.appendChild(a);
+        listEl.appendChild(li);
+      });
+    }
+
+    document.getElementById('ow-create').addEventListener('click', function () {
+      var nameEl = document.getElementById('ow-name');
+      var name = nameEl.value.trim();
+      var result = window.__owLocalVaults.create(name);
+      location.href = '/vault/' + encodeURIComponent(result.id);
+    });
+
+    // "Open a folder as vault" — File System Access API, Chromium-only
+    // (Firefox/Safari don't implement showDirectoryPicker). Feature-detect
+    // and hide the button entirely elsewhere (brief §5 DoD#5).
+    if ('showDirectoryPicker' in window) {
+      document.getElementById('ow-folder-row').style.display = '';
+      document.getElementById('ow-open-folder').addEventListener('click', async function () {
+        try {
+          var dir = await window.showDirectoryPicker({ mode: 'readwrite' }); // user gesture
+          var result = window.__owLocalVaults.create(dir.name, { type: 'folder' });
+          await window.__owFolderHandles.saveHandle(result.id, dir);
+          location.href = '/vault/' + encodeURIComponent(result.id);
+        } catch (e) {
+          if (e && e.name === 'AbortError') return; // user cancelled the picker
+          console.error('[obsidian-web] open folder as vault failed:', e);
+        }
+      });
+    }
+
+    render();
+  })();
+  </script>
+
+</body>
+</html>
