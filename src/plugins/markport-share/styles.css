@@ -26,3 +26,24 @@
 .markport-share-inactive .setting-item-description {
   opacity: 0.55;
 }
+
+.markport-share-linkbox {
+  display: flex;
+  gap: 8px;
+  margin: 0 0 12px;
+}
+.markport-share-linkbox .markport-share-url {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-small);
+}
+
+.markport-share-rowurl {
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-smaller);
+  color: var(--text-faint);
+  word-break: break-all;
+  user-select: text;
+  -webkit-user-select: text;
+}

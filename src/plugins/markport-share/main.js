@@ -3,7 +3,7 @@
 /**
  * Markport - Share.
  *
- * Adds "Share…" to the file menu of notes and folders (and a command for the
+ * Adds "Share link…" to the file menu of notes and folders (and a command for the
  * current note). A share is a link, /s/<id>, that shows the note or folder as
  * a static page; with "Can edit" the page also offers "Open in editor", a full
  * Obsidian editor that can reach only that note or folder. Links can have a
@@ -37,6 +37,22 @@ function shareUrl(share) {
   return window.location.origin + share.url;
 }
 
+// Obsidian's mobile app adds its own "Share" (the phone's share sheet) to
+// file menus. In a browser there is nothing behind it - clicking it does
+// nothing - and next to "Share link…" it reads like the broken version of it.
+// Found by section + icon, not by its title, which is translated.
+function removeNativeShare(menu) {
+  const items = (menu && menu.items) || [];
+  for (let i = items.length - 1; i >= 0; i--) {
+    const it = items[i];
+    const svg = it.iconEl && it.iconEl.querySelector && it.iconEl.querySelector('svg');
+    if (it.section === 'system' && svg && svg.classList.contains('lucide-arrow-up-right')) {
+      items.splice(i, 1);
+      if (it.dom) it.dom.remove();
+    }
+  }
+}
+
 function sharePath(file) {
   return !file.path || file.path === '/' ? '' : file.path;
 }
@@ -49,13 +65,47 @@ function describe(share) {
   return bits.join(' · ');
 }
 
-async function copyLink(share) {
-  try {
-    await navigator.clipboard.writeText(shareUrl(share));
-    new obsidian.Notice('Link copied');
-  } catch (_) {
-    new obsidian.Notice(shareUrl(share), 10000);
+// Copy text, returning whether it worked. navigator.clipboard only exists on
+// https:// and localhost (not on http://<LAN address>), and can hang or
+// refuse without focus, so fall back to the old execCommand route.
+async function copyText(text) {
+  if (navigator.clipboard && window.isSecureContext) {
+    try {
+      await Promise.race([
+        navigator.clipboard.writeText(text),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 1500)),
+      ]);
+      return true;
+    } catch (_) { /* fall through */ }
   }
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.setAttribute('readonly', '');
+  ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0;';
+  document.body.appendChild(ta);
+  ta.select();
+  let ok = false;
+  try { ok = document.execCommand('copy'); } catch (_) { ok = false; }
+  ta.remove();
+  return ok;
+}
+
+async function copyLink(share) {
+  const ok = await copyText(shareUrl(share));
+  new obsidian.Notice(ok ? 'Link copied' : 'Could not copy automatically - copy the link from the dialog.');
+  return ok;
+}
+
+// The link itself, visible and selectable - never only on the clipboard.
+function renderLinkBox(containerEl, share) {
+  const box = containerEl.createDiv({ cls: 'markport-share-linkbox' });
+  const input = box.createEl('input', { type: 'text', cls: 'markport-share-url' });
+  input.value = shareUrl(share);
+  input.readOnly = true;
+  input.addEventListener('focus', () => input.select());
+  const copy = box.createEl('button', { text: 'Copy' });
+  copy.addEventListener('click', async () => { input.select(); await copyLink(share); });
+  return input;
 }
 
 // One row per share, with Copy / Open / Revoke.
@@ -69,6 +119,7 @@ function renderShareList(containerEl, shares, { showPath, onChange }) {
     const setting = new obsidian.Setting(containerEl)
       .setName(showPath ? (share.path || '(whole vault)') : describe(share))
       .setDesc(showPath ? describe(share) : 'Created ' + new Date(share.createdAt).toLocaleString());
+    setting.descEl.createDiv({ cls: 'markport-share-rowurl', text: shareUrl(share) });
     if (share.expired || share.missing) setting.settingEl.addClass('markport-share-inactive');
     setting.addExtraButton((b) => b.setIcon('copy').setTooltip('Copy link').onClick(() => copyLink(share)));
     setting.addExtraButton((b) => b.setIcon('external-link').setTooltip('Open').onClick(() => window.open(shareUrl(share), '_blank', 'noopener')));
@@ -136,6 +187,7 @@ class ShareModal extends obsidian.Modal {
       });
     new obsidian.Setting(this.contentEl)
       .addButton((b) => b.setButtonText('Create link and copy').setCta().onClick(() => this.create(b)));
+    this.createdEl = this.contentEl.createDiv();
 
     this.contentEl.createEl('h4', { text: 'Links to this ' + (this.isFolder ? 'folder' : 'note') });
     this.listEl = this.contentEl.createDiv({ cls: 'markport-share-list' });
@@ -170,6 +222,11 @@ class ShareModal extends obsidian.Modal {
         password: this.password || null,
         expiresAt,
       });
+      this.createdEl.empty();
+      this.createdEl.createEl('p', { cls: 'markport-share-hint', text: 'New link - send this to the people you want to share with:' });
+      const input = renderLinkBox(this.createdEl, res.share);
+      input.focus();
+      input.select();
       await copyLink(res.share);
       await this.refresh();
     } catch (err) {
@@ -217,7 +274,7 @@ class ShareSettingTab extends obsidian.PluginSettingTab {
   async display() {
     const el = this.containerEl;
     el.empty();
-    el.createEl('p', { text: 'Right-click a note or folder and choose "Share…" to create a link.' });
+    el.createEl('p', { text: 'Right-click a note or folder and choose "Share link…" to create a link.' });
     const warningEl = el.createDiv();
     el.createEl('h3', { text: 'Links in this vault' });
     const listEl = el.createDiv({ cls: 'markport-share-list' });
@@ -247,11 +304,12 @@ module.exports = class MarkportSharePlugin extends obsidian.Plugin {
     if (!isServerVault()) return;
 
     this.registerEvent(this.app.workspace.on('file-menu', (menu, file) => {
+      removeNativeShare(menu);
       const shareable = file instanceof obsidian.TFolder || (file instanceof obsidian.TFile && file.extension === 'md');
       if (!shareable) return;
       menu.addItem((item) => item
-        .setTitle('Share…')
-        .setIcon('share-2')
+        .setTitle('Share link…')
+        .setIcon('link')
         .setSection('action')
         .onClick(() => new ShareModal(this.app, file).open()));
     }));

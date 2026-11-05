@@ -190,7 +190,7 @@ Server environment variables:
 
 ### Sharing a note or folder
 
-In a server vault, right-click a note or folder and choose **Share…** (the built-in
+In a server vault, right-click a note or folder and choose **Share link…** (the built-in
 `markport-share` system plugin). The link, `/s/<id>`, opens a static page rendered on the
 server with Obsidian's styling and your theme. Notes can link to each other, and embedded
 images can live elsewhere in the vault. The page runs no JavaScript.

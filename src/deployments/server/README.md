@@ -179,7 +179,7 @@ root `README.md`.
 
 ## Sharing
 
-Right-click a note or folder in a vault and choose **Share…**. Each link (`/s/<id>`) is a
+Right-click a note or folder in a vault and choose **Share link…**. Each link (`/s/<id>`) is a
 read-only page rendered on the server with your theme. With **Can edit**, the page also offers
 **Open in editor**, the Obsidian editor limited to that note, or to that folder and its
 subfolders. Recipients don't need an account. Links can have a password and an expiry date,

@@ -1210,11 +1210,28 @@ function describeShare(share) {
 async function copyShareLink(plugin, share) {
   const url = plugin.shareUrl(share);
   try {
-    await navigator.clipboard.writeText(url);
+    await Promise.race([
+      navigator.clipboard.writeText(url),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 1500)),
+    ]);
     new obsidian.Notice('Link copied');
   } catch (_) {
-    new obsidian.Notice(url, 10000);
+    new obsidian.Notice('Could not copy automatically - copy the link from the dialog.');
   }
+}
+
+// The new link, visible and selectable in the dialog - never only on the clipboard.
+function renderShareLinkBox(plugin, containerEl, share) {
+  const box = containerEl.createDiv();
+  box.style.cssText = 'display:flex;gap:8px;margin:0 0 12px;';
+  const input = box.createEl('input', { type: 'text' });
+  input.style.cssText = 'flex:1;min-width:0;font-family:var(--font-monospace);font-size:var(--font-ui-small);';
+  input.value = plugin.shareUrl(share);
+  input.readOnly = true;
+  input.addEventListener('focus', () => input.select());
+  const copy = box.createEl('button', { text: 'Copy' });
+  copy.addEventListener('click', () => { input.select(); copyShareLink(plugin, share); });
+  return input;
 }
 
 function renderShareRows(plugin, containerEl, shares, { showPath, onChange }) {
@@ -1228,6 +1245,8 @@ function renderShareRows(plugin, containerEl, shares, { showPath, onChange }) {
     const setting = new obsidian.Setting(containerEl)
       .setName(showPath ? (local === null ? share.path : (local || '(whole vault)')) : describeShare(share))
       .setDesc(showPath ? describeShare(share) : 'Created ' + new Date(share.createdAt).toLocaleString());
+    const urlEl = setting.descEl.createDiv({ text: plugin.shareUrl(share) });
+    urlEl.style.cssText = 'font-family:var(--font-monospace);font-size:var(--font-ui-smaller);word-break:break-all;user-select:text;';
     if (share.expired || share.missing) setting.settingEl.style.opacity = '0.55';
     setting.addExtraButton((b) => b.setIcon('copy').setTooltip('Copy link').onClick(() => copyShareLink(plugin, share)));
     setting.addExtraButton((b) => b.setIcon('external-link').setTooltip('Open in browser').onClick(() => window.open(plugin.shareUrl(share))));
@@ -1302,6 +1321,7 @@ class ShareModal extends obsidian.Modal {
       });
     new obsidian.Setting(this.contentEl)
       .addButton((b) => b.setButtonText('Create link and copy').setCta().onClick(() => this.create(b)));
+    this.createdEl = this.contentEl.createDiv();
 
     this.contentEl.createEl('h4', { text: 'Links to this ' + (this.isFolder ? 'folder' : 'note') });
     this.listEl = this.contentEl.createDiv();
@@ -1332,6 +1352,11 @@ class ShareModal extends obsidian.Modal {
     button.setDisabled(true);
     try {
       const share = await this.plugin.createShare(this.file, { permission: this.permission, password: this.password, expiresAt });
+      this.createdEl.empty();
+      this.createdEl.createEl('p', { cls: 'setting-item-description', text: 'New link - send this to the people you want to share with:' });
+      const input = renderShareLinkBox(this.plugin, this.createdEl, share);
+      input.focus();
+      input.select();
       await copyShareLink(this.plugin, share);
       await this.refresh();
     } catch (err) {
