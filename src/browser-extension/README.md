@@ -24,29 +24,45 @@ Two parts:
 **Markport:** nothing to do. It is a system plugin, so every vault opened in Markport has it.
 (Restart the server once after pulling it, since system plugins are discovered at startup.)
 
-**Desktop Obsidian:** copy the plugin into the vault, then turn it on.
-
-```powershell
-# PowerShell; <vault> is the vault's folder
-$dst = "<vault>\.obsidian\plugins\markport-clipper"
-New-Item -ItemType Directory -Force $dst | Out-Null
-Copy-Item src\plugins\markport-clipper\manifest.json, src\plugins\markport-clipper\main.js, src\plugins\markport-clipper\styles.css $dst
-```
+**Desktop Obsidian:** install it into the vault from the repo root. `<vault>` is the vault's
+folder, or its name as Obsidian shows it.
 
 ```bash
-# bash
-mkdir -p "<vault>/.obsidian/plugins/markport-clipper"
-cp src/plugins/markport-clipper/{manifest.json,main.js,styles.css} "<vault>/.obsidian/plugins/markport-clipper/"
+npm run clipper -- --add <vault>
 ```
 
-In Obsidian: **Settings > Community plugins**, turn community plugins on if needed, and enable
-**Markport - Image Clipper**. Then pair it with the extension:
+This copies the plugin's code into `<vault>/.obsidian/plugins/markport-clipper/` and adds it to
+the vault's enabled plugins. Restart Obsidian afterwards.
+
+If the vault never used community plugins, Obsidian asks once to turn them on (**Settings >
+Community plugins**). Then pair it with the extension:
 
 1. In Obsidian, **Settings > Markport - Image Clipper > Pairing key > Copy**.
 2. Right-click the extension's icon > **Options**, paste the key under *Obsidian (desktop app)*, **Save**.
 3. **Find vaults** should list the vault as "*name* (Obsidian)".
 
 Each vault has its own key. Paste one per line to use several vaults.
+
+### Several computers
+
+The repo is the one copy of both parts. On each computer, clone it, load the extension unpacked
+from the clone's `src/browser-extension/` (in Chrome and in Edge, if you use both), and after
+every `git pull` run:
+
+```bash
+npm run clipper
+```
+
+It updates the plugin in every desktop vault that has it (the vaults come from desktop
+Obsidian's own list), and never touches the plugin's `data.json`, which holds its settings,
+pairing key and image library. It also says where each browser loads the extension from: a copy
+outside this repo, or one the browser still runs an older version of (reload it on the
+extensions page). `--dry-run` only shows what would change.
+
+A vault synced between the computers (NextCloud, Obsidian Sync with *Installed community
+plugins* on) brings the plugin and its `data.json` along, so its pairing key is the same on
+every computer. The extension's pairing keys are stored per browser, not synced: paste the key
+into Options once on each computer.
 
 ## Use
 

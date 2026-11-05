@@ -10,6 +10,7 @@
     "setup": "node scripts/dev.js setup",
     "dev": "node scripts/dev.js dev",
     "start": "node scripts/dev.js start",
-    "test": "node scripts/dev.js test"
+    "test": "node scripts/dev.js test",
+    "clipper": "node scripts/sync-clipper.js"
   }
 }
