@@ -26,14 +26,37 @@ const { warmUpBootstrapCache } = require('./api/bootstrap');
 const createProxyRouter = require('./api/proxy');
 const createSystemPluginFilesRouter = require('./api/system-plugin-files');
 const attachWatchServer = require('./api/watch');
+const { createVaultEvents } = require('./api/vault-events');
+const { createNodeBridgeRouter, attachNodeBridgeProcServer } = require('./api/node-bridge');
 const VaultRegistry = require('./vault-registry');
+const { createAuth } = require('./auth');
+const { createSharing } = require('./shares');
+const { loginPage, pageHeaders } = require('./shares/html');
+
+// Only same-site paths may be redirect targets (no open redirect via ?next=).
+function safeLocalPath(p) {
+  return typeof p === 'string' && p.startsWith('/') && !p.startsWith('//') && !p.includes('\\') ? p : '/';
+}
 
 function createApp(appConfig = {}) {
   // Merge with the default config so partial overrides (used by tests) don't
   // crash on missing fields like clientMobilePath. Explicit overrides still win.
   appConfig = Object.assign({}, config, appConfig);
   const app = express();
+  // The usual deployment is behind a reverse proxy on the same host or a
+  // private network: trust its X-Forwarded-* headers there, so HTTPS is
+  // detected (Secure cookies) and rate limits see the real client address.
+  app.set('trust proxy', 'loopback, linklocal, uniquelocal');
   const vaultRegistry = new VaultRegistry(appConfig.registryPath);
+  // Session secret, shares.json and per-share data live next to the registry.
+  const dataDir = appConfig.dataDir || path.dirname(appConfig.registryPath);
+  const auth = createAuth({ password: appConfig.ownerPassword, dataDir });
+  const sharing = createSharing({ vaultRegistry, dataDir, auth });
+  // Changes made through /api/fs, pushed live to the other sessions (watch.js).
+  const vaultEvents = createVaultEvents();
+  app.locals.auth = auth;
+  app.locals.sharing = sharing;
+  app.locals.vaultEvents = vaultEvents;
   if (appConfig.vaultsDir) {
     const ids = vaultRegistry.syncDir(appConfig.vaultsDir, appConfig.defaultVaultName);
     console.log(`[vaults] ${ids.length} vault(s) in ${appConfig.vaultsDir}`);
@@ -99,28 +122,85 @@ function createApp(appConfig = {}) {
     }
   }
 
+  // Never leak a share link (or a vault id) to other sites through Referer.
+  app.use((req, res, next) => {
+    res.setHeader('Referrer-Policy', 'same-origin');
+    next();
+  });
+
+  // ── Owner login (auth.js) ────────────────────────────────────────────────
+  app.get('/login', (req, res) => {
+    const next = safeLocalPath(req.query.next);
+    if (!auth.enabled || auth.isOwner(req)) return res.redirect(303, next);
+    pageHeaders(res);
+    res.send(loginPage(next));
+  });
+  app.post('/login', express.urlencoded({ extended: false, limit: '8kb' }), (req, res) => {
+    const next = safeLocalPath(req.body && req.body.next);
+    if (!auth.enabled) return res.redirect(303, next);
+    const key = auth.clientKey(req);
+    pageHeaders(res);
+    if (auth.loginLimiter.blocked(key)) {
+      return res.status(429).send(loginPage(next, 'Too many attempts. Try again in a few minutes.'));
+    }
+    if (!auth.checkPassword(String((req.body && req.body.password) || ''))) {
+      auth.loginLimiter.fail(key);
+      return res.status(401).send(loginPage(next, 'Wrong password.'));
+    }
+    auth.loginLimiter.reset(key);
+    auth.setOwnerSession(req, res);
+    res.redirect(303, next);
+  });
+  app.all('/logout', (req, res) => {
+    auth.clearOwnerSession(req, res);
+    res.redirect(303, auth.enabled ? '/login' : '/');
+  });
+  app.get('/api/auth/status', (req, res) => {
+    res.json({ authEnabled: auth.enabled, owner: auth.isOwner(req) });
+  });
+  // Password → API token, for clients that can't keep the login cookie (the
+  // native Obsidian plugin markport-sync). Same limiter as /login.
+  app.post('/api/auth/token', express.json({ limit: '8kb' }), (req, res) => {
+    if (!auth.enabled) return res.json({ authEnabled: false, token: null });
+    const key = auth.clientKey(req);
+    if (auth.loginLimiter.blocked(key)) {
+      return res.status(429).json({ error: 'too many attempts, try again in a few minutes', code: 'ERATE' });
+    }
+    if (!auth.checkPassword(String((req.body && req.body.password) || ''))) {
+      auth.loginLimiter.fail(key);
+      return res.status(401).json({ error: 'wrong password', code: 'EAUTH' });
+    }
+    auth.loginLimiter.reset(key);
+    res.json(Object.assign({ authEnabled: true }, auth.issueApiToken()));
+  });
+
+  // ── Share links (shares/pages.js) - public, scoped by the link ───────────
+  app.use('/s', sharing.pages);
+
+  function ownerPage(req, res, next) {
+    if (auth.isOwner(req)) return next();
+    res.redirect(303, '/login?next=' + encodeURIComponent(req.originalUrl));
+  }
+  const sendShell = (res) => sendHtmlWithCacheBust(res, path.join(appConfig.clientMobilePath, 'index.html'));
+
   // Entry point - mobile is now the only runtime, served at / (finale of the
   // mobile-first epic; see docs/decisions for the collapse-desktop rationale).
-  app.get('/', (req, res) => {
-    sendHtmlWithCacheBust(res, path.join(appConfig.clientMobilePath, 'index.html'));
-  });
-
-  // Mobile client entry point (alias, backwards-compatible with existing
-  // tunnels/links that already point at /mobile).
-  app.get('/mobile', (req, res) => {
-    sendHtmlWithCacheBust(res, path.join(appConfig.clientMobilePath, 'index.html'));
-  });
-
+  // /mobile is a backwards-compatible alias for existing tunnels/links.
   // Path-based routing (docs/plans/url-routing.md §3ג): /starter is the
-  // chooser/onboarding route (ignores auto-resume) and /vault/:id is an
-  // open, shareable vault URL. Both serve the same shell as / — boot.js
-  // reads location.pathname to decide what to render. Not a redirect: the
-  // id must stay visible/bookmarkable in the browser URL.
-  // /vault/:id/* (docs/plans/vault-note-deeplink.md §3ד): document-level
-  // deep link — /vault/<id>/<note-path> (note-path may have nested
-  // segments). Same shell; boot.js parses id + note-path from the path.
-  app.get(['/starter', '/starter.html', '/vault/:id', '/vault/:id/*'], (req, res) => {
-    sendHtmlWithCacheBust(res, path.join(appConfig.clientMobilePath, 'index.html'));
+  // chooser/onboarding route (ignores auto-resume). Same shell; boot.js reads
+  // location.pathname to decide what to render.
+  app.get(['/', '/mobile', '/starter', '/starter.html'], ownerPage, (req, res) => sendShell(res));
+
+  // /vault/:id is an open, shareable vault URL and /vault/:id/* a deep link
+  // to a note in it (docs/plans/vault-note-deeplink.md §3ד). Not a redirect:
+  // the id must stay visible/bookmarkable in the browser URL. A share id
+  // opens that share's scoped editor (edit shares only).
+  app.get(['/vault/:id', '/vault/:id/*'], (req, res, next) => {
+    const share = sharing.shares.get(req.params.id);
+    if (share) {
+      return sharing.vaultShell(req, res, share, req.params[0] || '', () => sendShell(res)).catch(next);
+    }
+    ownerPage(req, res, () => sendShell(res));
   });
 
   // Static files.
@@ -189,11 +269,27 @@ function createApp(appConfig = {}) {
     });
   });
 
-  // API routes.
+  // API routes. Share vaults are routed to their scoped handlers first; every
+  // other /api route below the ownerOnly line needs the owner.
+  app.use('/api/fs', express.json({ limit: '1mb' }), sharing.fsGate);
+  app.use('/api/bootstrap', sharing.bootstrapGate);
+  app.get('/api/vaults/list', (req, res, next) => {
+    if (auth.isOwner(req)) return next();
+    sharing.grantedVaults(req).then((v) => res.json(v), next);
+  });
+  app.use('/api/shares', sharing.ownerApi());
+  app.use('/api', sharing.ownerOnly);
+
   app.use('/api/bootstrap', createBootstrapRouter(vaultRegistry, appConfig.vaultPath, appConfig.bootstrap));
   app.use('/api/proxy-request', createProxyRouter());
-  app.use('/api/vaults', createVaultsRouter(vaultRegistry));
-  app.use('/api/fs', createFsRouter(vaultRegistry, appConfig.vaultPath));
+  app.use('/api/vaults', createVaultsRouter(vaultRegistry, appConfig.vaultsDir));
+  app.use('/api/node-bridge', createNodeBridgeRouter(vaultRegistry, appConfig.nodeBridge));
+  if (appConfig.nodeBridge) console.warn('[node-bridge] ENABLED - anyone who can reach this server can run commands on it as the server user. Keep it behind an authenticating reverse proxy.');
+  app.use('/api/fs', createFsRouter(vaultRegistry, appConfig.vaultPath, {
+    // Keep share links pointing at an item the owner renames or moves.
+    onRename: (vaultId, oldPath, newPath) => sharing.shares.renamed(vaultId, oldPath, newPath),
+    events: vaultEvents,
+  }));
   app.use('/api/electron', createElectronRouter(vaultRegistry, appConfig.vaultPath));
   app.use('/api', createSystemPluginFilesRouter());
 
@@ -208,7 +304,12 @@ function startServer(appConfig = config) {
 
   const app = createApp(appConfig);
   const server = http.createServer(app);
-  attachWatchServer(server, app.locals.vaultRegistry, appConfig.vaultPath);
+  attachWatchServer(server, app.locals.vaultRegistry, appConfig.vaultPath, {
+    isOwner: app.locals.auth.isOwner,
+    shareTarget: app.locals.sharing.watchTarget,
+    events: app.locals.vaultEvents,
+  });
+  attachNodeBridgeProcServer(server, appConfig.nodeBridge, app.locals.auth.isOwner);
 
   server.listen(appConfig.port, appConfig.host, () => {
     console.log('==========================================');
@@ -217,6 +318,7 @@ function startServer(appConfig = config) {
     console.log('  Vault:    ' + appConfig.vaultPath);
     console.log('  Obsidian: ' + appConfig.obsidianMobilePath);
     console.log('  Listening on http://' + appConfig.host + ':' + appConfig.port);
+    console.log('  Login:    ' + (app.locals.auth.enabled ? 'owner password (MARKPORT_PASSWORD)' : 'NONE - set MARKPORT_PASSWORD or put an authenticating proxy in front'));
     console.log('==========================================');
 
     // Pre-build the bootstrap cache in the background so the first browser

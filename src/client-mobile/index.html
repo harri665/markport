@@ -183,6 +183,11 @@
        already ran by the time either is ever called. -->
   <script src="/client-mobile/shims/electron.js?v=1"></script>
 
+  <!-- Node bridge for desktop-only plugins (server mode, MARKPORT_NODE_BRIDGE=true).
+       Only defines window.__owInstallNodeBridge; boot.js calls it once the
+       module map and the vault id/type exist. -->
+  <script src="/client-mobile/shims/node-bridge.js?v=1"></script>
+
   <!-- 4. Boot: vault selection, window.require, desktop cleanup.
        Obsidian's scripts (i18next, enhance, i18n, app.js) are injected
        DYNAMICALLY by boot.js after vault verification — same mechanism as

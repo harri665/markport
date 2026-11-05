@@ -39,6 +39,7 @@ const fsp = fs.promises;
 const path = require('path');
 const zlib = require('zlib');
 const config = require('../config');
+const { mergeCommunityList, getSystemPluginIds, getSystemPluginDir } = require('../system-plugins');
 
 // ── Server-side bootstrap cache ───────────────────────────────────────────────
 //
@@ -255,6 +256,68 @@ async function walkDir(dir, root, fsCache, dirsCache, walkHidden = false, progre
   }
 }
 
+/**
+ * The client serves files in this response without asking /api/fs, so the
+ * system-plugin overlay that /api/fs/read applies to community-plugins.json
+ * has to be applied here too. Without it, a vault whose .obsidian/ already
+ * holds that file (Obsidian writes it, with system ids stripped, on first
+ * open) loads no system plugin on any later open.
+ */
+function applySystemPluginOverlay(fsCache, dirsCache) {
+  const rel = '.obsidian/community-plugins.json';
+  const entry = fsCache[rel];
+  if (entry && typeof entry.content === 'string') {
+    let list = [];
+    try {
+      const parsed = JSON.parse(entry.content);
+      if (Array.isArray(parsed)) list = parsed;
+    } catch (_) { /* malformed: start from empty, as /api/fs/read does */ }
+    const content = JSON.stringify(mergeCommunityList(list));
+    fsCache[rel] = { ...entry, content, size: Buffer.byteLength(content) };
+  }
+  if (dirsCache) addSystemPluginDirs(fsCache, dirsCache);
+}
+
+/**
+ * The plugin folders themselves, too. Obsidian finds plugins by listing
+ * .obsidian/plugins, and the client answers that listing from this response,
+ * so a system plugin missing here is never loaded, even though it is enabled
+ * (the overlay above) and /api/fs/readdir would list it. Only stats go in:
+ * no content, so reads fall through to /api/fs/read, which serves the files
+ * from src/plugins/. A vault's own copy of a plugin folder wins, as it does
+ * in /api/fs.
+ */
+function addSystemPluginDirs(fsCache, dirsCache) {
+  const now = Date.now();
+  const dirEntry = (name, mtime) => ({ name, isFile: false, isDirectory: true, isSymbolicLink: false, mtime, size: 0 });
+  const ensureChild = (parent, name) => {
+    const list = dirsCache[parent] || (dirsCache[parent] = []);
+    if (!list.some((e) => e.name === name)) list.push(dirEntry(name, now));
+  };
+  for (const id of getSystemPluginIds()) {
+    const rel = '.obsidian/plugins/' + id;
+    if (dirsCache[rel]) continue;
+    const dir = getSystemPluginDir(id);
+    let names;
+    try { names = fs.readdirSync(dir); } catch (_) { continue; }
+    const entries = [];
+    for (const name of names) {
+      let st;
+      try { st = fs.statSync(path.join(dir, name)); } catch (_) { continue; }
+      if (!st.isFile()) continue;
+      entries.push({ name, isFile: true, isDirectory: false, isSymbolicLink: false, mtime: st.mtimeMs, size: st.size });
+      fsCache[rel + '/' + name] = { mtime: st.mtimeMs, size: st.size, isFile: true };
+    }
+    if (!fsCache['.obsidian']) fsCache['.obsidian'] = { mtime: now, size: 0, isFile: false, isDirectory: true };
+    if (!fsCache['.obsidian/plugins']) fsCache['.obsidian/plugins'] = { mtime: now, size: 0, isFile: false, isDirectory: true };
+    ensureChild('', '.obsidian');
+    ensureChild('.obsidian', 'plugins');
+    ensureChild('.obsidian/plugins', id);
+    fsCache[rel] = { mtime: now, size: 0, isFile: false, isDirectory: true };
+    dirsCache[rel] = entries;
+  }
+}
+
 // ── core build ────────────────────────────────────────────────────────────────
 
 /**
@@ -390,6 +453,8 @@ async function _buildCacheEntry(vaultId, vaultRoot, vaultRegistry, full = false)
     setProgress(vaultId, { state: 'scanning', label: 'Scanning vault (full)...' });
     await walkDir(vaultRoot, vaultRoot, fsCache, dirsCache, false, progress, budget);
   }
+
+  applySystemPluginOverlay(fsCache, dirsCache);
 
   setProgress(vaultId, { state: 'reading', label: 'Reading files...', pct: 80 });
   const fileCount = Object.keys(fsCache).length;
@@ -583,3 +648,4 @@ module.exports = createBootstrapRouter;
 module.exports.serverCache = serverCache;
 module.exports.pendingBuilds = pendingBuilds;
 module.exports.warmUpBootstrapCache = warmUpBootstrapCache;
+module.exports.buildElectronValues = buildElectronValues;

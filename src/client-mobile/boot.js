@@ -407,6 +407,10 @@ const MOBILE_SCRIPTS = [
     return undefined;
   };
   window.__owMissing = missing;
+  // The bundle captures window.require by reference at load (`kn=window.require`),
+  // so replacing window.require later has no effect on plugins. The module map
+  // itself is shared instead: shims/node-bridge.js fills it in (server mode).
+  window.__owModules = modules;
 
   window.process = window.process || {
     platform: 'linux', arch: 'x64',
@@ -433,6 +437,16 @@ const MOBILE_SCRIPTS = [
       isBuffer: function(x){ return x instanceof Uint8Array; },
       alloc: function(n){ return new Uint8Array(n); },
     };
+  }
+
+  // Node bridge (shims/node-bridge.js) - after window.process and Buffer
+  // exist, which it extends; synchronous, so it is in place before app.js
+  // (injected later) loads any plugin. No-op unless server mode with
+  // MARKPORT_NODE_BRIDGE=true.
+  modules.process = window.process;
+  if (typeof window.__owInstallNodeBridge === 'function') {
+    try { window.__owInstallNodeBridge(); }
+    catch (e) { console.error('[obsidian-web] node bridge failed to install:', e); }
   }
 
   console.log('[obsidian-web] mobile boot: require + shims installed, vault=' + VAULT_ID);
@@ -650,7 +664,7 @@ const MOBILE_SCRIPTS = [
       .then(function (res) {
         Object.keys(res || {}).forEach(function (id) {
           var v = res[id] || {};
-          var name = (v.path || id).split('/').pop();
+          var name = (v.path || id).split(/[\\/]/).pop();   // server may be Windows (dev)
           items.push(id + '/' + name);
           ids.push(id);
         });
@@ -805,6 +819,20 @@ const MOBILE_SCRIPTS = [
       var name = nameInput.value.trim() || 'Untitled';
       var selectedRadio = screen.querySelector('.mobile-onboarding-radio-option.is-selected');
       var location_ = 'app';   // ברירת-מחדל בטוחה — לא דורש directory picker/permission
+
+      // "On the server" — an option WE inject (installStorageOptions below),
+      // so the bundle has no handler for it. Marked by data-ow-storage, not
+      // by position or text.
+      if (selectedRadio && selectedRadio.getAttribute('data-ow-storage') === 'server') {
+        createServerVault(name)
+          .then(function (id) { navigateToVault(id); })
+          .catch(function (err) {
+            var msg = 'Could not create the vault on the server: ' + (err && err.message || err);
+            if (typeof window.Notice === 'function') new window.Notice(msg); else alert(msg);
+            setTimeout(function () { window.__owCreatingVault = false; }, 0);
+          });
+        return;
+      }
       // §3.5ב (calev PARTIAL, ממצא 1 — DoD#13): זה היה עדיין /app storage/i
       // על הכותרת המרונדרת — נשכח באותה מכה כמו btnText למעלה, ונופל לאותה
       // מלכודת: בעברית ("אחסון האפליקציה") ה-regex האנגלי לא תואם ⇒ location_
@@ -813,7 +841,9 @@ const MOBILE_SCRIPTS = [
       // ה-DOM שקבוע ע"י addOption('external').addOption('app') בבאנדל, לא
       // הטקסט — index 0 בקבוצת האחים = external, index 1 = app.
       if (selectedRadio && selectedRadio.parentNode) {
-        var siblings = selectedRadio.parentNode.querySelectorAll('.mobile-onboarding-radio-option');
+        // :not([data-ow-storage]) — skip our injected "On the server" option,
+        // which would otherwise shift the bundle's own options' positions.
+        var siblings = selectedRadio.parentNode.querySelectorAll('.mobile-onboarding-radio-option:not([data-ow-storage])');
         location_ = (siblings[0] === selectedRadio) ? 'external' : 'app';
       }
       // §3.1ב layer 1 (logic, mandatory) — the "Device storage" radio option
@@ -920,7 +950,7 @@ const MOBILE_SCRIPTS = [
         if (!screen.querySelector('input[type="text"]')) continue;   // לא מסך-הגדרת-vault
         var groups = screen.querySelectorAll('.mobile-onboarding-radio-group');
         for (var g = 0; g < groups.length; g++) {
-          var options = groups[g].querySelectorAll('.mobile-onboarding-radio-option');
+          var options = groups[g].querySelectorAll('.mobile-onboarding-radio-option:not([data-ow-storage])');
           if (options.length < 2) continue;   // לא קבוצת device/app storage (2 אפשרויות תמיד)
           var externalOpt = options[0], appOpt = options[1];   // סדר addOption() בבאנדל — לא טקסט
           if (externalOpt.__owGated) continue;   // idempotent — כבר טופל
@@ -943,6 +973,126 @@ const MOBILE_SCRIPTS = [
     }
     gate();
     var obs = new MutationObserver(gate);
+    obs.observe(document.body, { childList: true, subtree: true });
+  }
+
+  // ── Storage options on the create-vault screen ──────────────────────────────
+  // The bundle's two options are written for Android: "Device storage"
+  // (recommended, other apps can read it) and "App storage". In a browser they
+  // mean something else, so they are relabelled to what they actually do here:
+  //   option 0 ('external') → a folder on this computer (File System Access)
+  //   option 1 ('app')      → this browser's private storage (OPFS)
+  // and, when the server owns a vaults directory (GET /api/vaults/storage,
+  // the Docker deployment), a third option is added: a folder on the server,
+  // which every browser opening the site can see. It becomes the default
+  // there, since that is what a server deployment is for.
+  // Anchored on DOM order (addOption('external').addOption('app') in the
+  // bundle, the same anchor installExternalStorageGate uses), never on the
+  // translated text - see §3.5ב above.
+  var owServerStorage = null;   // null = unknown yet; then { serverCreate: bool }
+  function loadServerStorage() {
+    if (window.__owBackend === 'none') {   // client-only build: no server at all
+      owServerStorage = { serverCreate: false };
+      return Promise.resolve(owServerStorage);
+    }
+    return fetch('/api/vaults/storage')
+      .then(function (r) { return r.ok ? r.json() : { serverCreate: false }; })
+      .catch(function () { return { serverCreate: false }; })
+      .then(function (s) { owServerStorage = { serverCreate: !!(s && s.serverCreate) }; return owServerStorage; });
+  }
+
+  function createServerVault(name) {
+    return fetch('/api/vaults/create', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: name }),
+    })
+      .then(function (r) { return r.json().catch(function () { return {}; }).then(function (b) { return { r: r, b: b }; }); })
+      .then(function (x) {
+        if (!x.r.ok || !x.b.ok || !x.b.id) throw new Error(x.b.error || ('HTTP ' + x.r.status));
+        return x.b.id;
+      });
+  }
+
+  function setOptionText(opt, title, lines, flair) {
+    var titleEl = opt.querySelector('.mobile-onboarding-radio-option-title');
+    var descEl = opt.querySelector('.mobile-onboarding-radio-option-desc');
+    if (titleEl) {
+      titleEl.textContent = title;
+      if (flair) {
+        var f = document.createElement('span');
+        f.className = 'flair';
+        f.textContent = flair;
+        titleEl.appendChild(f);
+      }
+    }
+    if (descEl) {
+      descEl.innerHTML = '';
+      lines.forEach(function (t) {
+        var li = document.createElement('li');
+        li.textContent = t;
+        descEl.appendChild(li);
+      });
+    }
+  }
+
+  function installStorageOptions() {
+    function apply() {
+      var screens = document.querySelectorAll('.mobile-onboarding, .mobile-vault-chooser-screen');
+      for (var s = 0; s < screens.length; s++) {
+        var screen = screens[s];
+        if (!screen.querySelector('input[type="text"]')) continue;   // not a create-vault screen
+        var groups = screen.querySelectorAll('.mobile-onboarding-radio-group');
+        for (var g = 0; g < groups.length; g++) {
+          var group = groups[g];
+          var native = group.querySelectorAll('.mobile-onboarding-radio-option:not([data-ow-storage])');
+          if (native.length !== 2) continue;   // not the device/app storage pair
+          var folderOpt = native[0], browserOpt = native[1];
+
+          if (!group.__owRelabelled) {
+            group.__owRelabelled = true;
+            setOptionText(folderOpt, 'Folder on this computer', [
+              'Plain .md files in a folder you pick - other apps can open them.',
+              'Chrome and Edge only. Asks for folder access each session.',
+            ]);
+            setOptionText(browserOpt, 'Browser storage', [
+              'Kept inside this browser. Works in every browser.',
+              'Only this browser on this device sees it - clearing site data deletes it.',
+            ]);
+          }
+
+          if (owServerStorage && owServerStorage.serverCreate && !group.__owServerAdded) {
+            group.__owServerAdded = true;
+            var opt = browserOpt.cloneNode(true);   // same markup as a native option, no listeners
+            opt.setAttribute('data-ow-storage', 'server');
+            opt.classList.remove('is-selected');
+            setOptionText(opt, 'On the server', [
+              'A folder on the Markport server.',
+              'Every browser that opens this site sees it.',
+            ], 'Recommended');
+            group.insertBefore(opt, group.firstChild);
+
+            var selectServer = function (on) {
+              opt.classList.toggle('is-selected', on);
+              if (on) native.forEach(function (n) { n.classList.remove('is-selected'); });
+            };
+            opt.addEventListener('click', function (e) { e.preventDefault(); selectServer(true); });
+            opt.addEventListener('keydown', function (e) {
+              if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); selectServer(true); }
+            });
+            // A native option clicked afterwards: the bundle selects it but
+            // knows nothing about ours, so ours is cleared here.
+            native.forEach(function (n) {
+              n.addEventListener('click', function () { selectServer(false); });
+            });
+            selectServer(true);   // default on a server deployment
+          }
+        }
+      }
+    }
+    apply();
+    loadServerStorage().then(apply);
+    var obs = new MutationObserver(apply);
     obs.observe(document.body, { childList: true, subtree: true });
   }
 
@@ -983,6 +1133,7 @@ const MOBILE_SCRIPTS = [
     installNativeVaultOpenBridge();
     installCreateVaultInterceptor();
     installExternalStorageGate();
+    installStorageOptions();
     installVersionDisplay();
     seedNativeVaultList()
       .catch(function (err) { console.warn('[obsidian-web] seedNativeVaultList failed:', err); })

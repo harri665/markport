@@ -42,12 +42,26 @@ COPY src/runtime-server/server src/runtime-server/server
 COPY src/client-mobile src/client-mobile
 COPY src/config src/config
 COPY src/plugins src/plugins
+COPY scripts/install-plugin.js scripts/install-plugin.js
 COPY --from=obsidian /build/vendor/obsidian-mobile vendor/obsidian-mobile
 COPY --from=obsidian /build/src/client-mobile/obsidian-version.js src/client-mobile/obsidian-version.js
 
+# Optional: Claude Code CLI, for the Claudian plugin through the node bridge
+# (MARKPORT_NODE_BRIDGE=true). git and ripgrep are what Claude Code uses to
+# work in the vault folder.
+ARG INSTALL_CLAUDE_CODE=false
+RUN if [ "$INSTALL_CLAUDE_CODE" = "true" ]; then \
+      apt-get update \
+   && apt-get install -y --no-install-recommends git ripgrep ca-certificates \
+   && rm -rf /var/lib/apt/lists/* \
+   && npm install -g @anthropic-ai/claude-code \
+   && npm cache clean --force; \
+    fi
+
 # /data holds everything that must survive a rebuild: one folder per vault
-# under /data/vaults, plus the vault registry.
-RUN mkdir -p /data/vaults && chown -R node:node /data
+# under /data/vaults, the vault registry, and the server user's home
+# (/data/home - Claude Code keeps its login and settings there).
+RUN mkdir -p /data/vaults /data/home && chown -R node:node /data
 VOLUME /data
 
 ENV HOST=0.0.0.0 \
@@ -55,7 +69,9 @@ ENV HOST=0.0.0.0 \
     VAULTS_DIR=/data/vaults \
     DEFAULT_VAULT_NAME=Notes \
     VAULT_PATH=/data/vaults/Notes \
-    VAULT_REGISTRY=/data/registry.json
+    VAULT_REGISTRY=/data/registry.json \
+    HOME=/data/home \
+    DISABLE_AUTOUPDATER=1
 
 USER node
 EXPOSE 3500
@@ -63,4 +79,5 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||3500)+'/api/vaults/list').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"
 
 WORKDIR /app/src/runtime-server/server
-CMD ["node", "index.js"]
+# HOME may not exist yet on a freshly bind-mounted /data.
+CMD ["sh", "-c", "mkdir -p \"$HOME\" && exec node index.js"]

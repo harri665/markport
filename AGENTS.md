@@ -74,6 +74,8 @@ The output carries **no JavaScript**. Code samples are highlighted at build time
 | Node backend (optional) | `src/runtime-server/` |
 | Pull-sync server | `src/sync-server/` |
 | Cloudflare deployment | `src/deployments/cloudflare/` |
+| Image clipper browser extension (pairs with `src/plugins/markport-clipper/`) | `src/browser-extension/` |
+| Plugins for the native Obsidian app (live sync with the server: `markport-sync`) - not system plugins | `src/native-plugins/` |
 
 ## Before you touch the bundle
 

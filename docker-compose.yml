@@ -3,9 +3,10 @@
 #   cp .env.example .env    # optional - every setting has a default
 #   docker compose up -d --build
 #
-# The app has no login of its own. By default it is published on 127.0.0.1
-# only, for a reverse proxy on the same host to forward to. Put authentication
-# and HTTPS in that proxy. See src/deployments/server/README.md.
+# Set MARKPORT_PASSWORD (in .env) to give the app its own login; share links
+# work without it. Without it the app has no login and the proxy must
+# authenticate. It is published on 127.0.0.1 only, for a reverse proxy on the
+# same host to add HTTPS. See src/deployments/server/README.md.
 
 services:
   markport:
@@ -13,6 +14,7 @@ services:
       context: .
       args:
         OBSIDIAN_VERSION: ${OBSIDIAN_VERSION:-1.12.7}
+        INSTALL_CLAUDE_CODE: ${MARKPORT_NODE_BRIDGE:-false}
     image: markport:local
     # Local-only image: never pull it from a registry, always build it here.
     # Without this, Portainer's "Re-pull image" tries Docker Hub and fails.
@@ -22,9 +24,15 @@ services:
     ports:
       - "${MARKPORT_BIND:-127.0.0.1}:${MARKPORT_PORT:-3500}:3500"
     environment:
+      # Owner login. Empty = no login (then the proxy must authenticate).
+      MARKPORT_PASSWORD: ${MARKPORT_PASSWORD:-}
       DEFAULT_VAULT_NAME: ${DEFAULT_VAULT_NAME:-Notes}
       VAULT_PATH: /data/vaults/${DEFAULT_VAULT_NAME:-Notes}
       WATCH_POLLING: ${WATCH_POLLING:-false}
+      # Real Node APIs for desktop-only plugins (Claudian). Lets anyone who
+      # can open the site run commands in this container - only with an
+      # authenticating reverse proxy in front. See the server README.
+      MARKPORT_NODE_BRIDGE: ${MARKPORT_NODE_BRIDGE:-false}
     volumes:
       - ${MARKPORT_DATA:-markport-data}:/data
     # If your proxy runs as a container on a shared Docker network instead of

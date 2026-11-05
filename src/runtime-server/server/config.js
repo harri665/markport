@@ -69,6 +69,13 @@ module.exports = {
   // it is empty. Used by the Docker image, where it points at the data volume.
   vaultsDir: process.env.VAULTS_DIR ? path.resolve(PROJECT_ROOT, process.env.VAULTS_DIR) : null,
   defaultVaultName: process.env.DEFAULT_VAULT_NAME || 'Notes',
+  // Owner login (auth.js). When set, the whole app asks for this password,
+  // and share links (/s/<id>) are the only way in without it. When empty,
+  // there is no login - put an authenticating reverse proxy in front.
+  ownerPassword: process.env.MARKPORT_PASSWORD || '',
+  // Real Node APIs for desktop-only plugins (api/node-bridge.js). Remote code
+  // execution by design - off unless explicitly enabled.
+  nodeBridge: process.env.MARKPORT_NODE_BRIDGE === 'true',
   obsidianMobilePath: OBSIDIAN_MOBILE_PATH,
   clientMobilePath: CLIENT_MOBILE_PATH,
   projectRoot: PROJECT_ROOT,

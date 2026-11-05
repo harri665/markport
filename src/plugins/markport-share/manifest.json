@@ -1,0 +1,9 @@
+{
+  "id": "markport-share",
+  "name": "Markport - Share",
+  "version": "0.1.0",
+  "minAppVersion": "1.0.0",
+  "description": "Share a note or folder as a link: a read-only web page, or an editor limited to just that note or folder. Optional password and expiry. Server vaults only.",
+  "author": "Markport",
+  "isDesktopOnly": false
+}

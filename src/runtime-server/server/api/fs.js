@@ -68,6 +68,23 @@ function shouldCoalesce(absPath) {
   return last && (Date.now() - last) < COALESCE_WINDOW_MS;
 }
 
+function pendingSize(entry) {
+  return typeof entry.data === 'string'
+    ? Buffer.byteLength(entry.data, entry.encoding || 'utf8')
+    : entry.data.length;
+}
+
+// Write a buffered entry to disk. The file gets the mtime the API already
+// reported for it while it was buffered (stat, the write response, the change
+// event), so clients that recorded that mtime don't see the flush as yet
+// another change.
+async function writePending(absPath, entry) {
+  await fsp.writeFile(absPath, entry.data, entry.encoding ? { encoding: entry.encoding } : undefined);
+  try { await fsp.utimes(absPath, new Date(), new Date(entry.mtime)); } catch (_) { /* best effort */ }
+  lastWriteTime.set(absPath, Date.now());
+  if (entry.events) entry.events.expect(absPath, 'change', { mtime: entry.mtime, size: pendingSize(entry) });
+}
+
 function scheduleFlush(absPath) {
   const entry = pendingWrites.get(absPath);
   if (!entry) return;
@@ -77,8 +94,7 @@ function scheduleFlush(absPath) {
     if (!pending) return;
     pendingWrites.delete(absPath);
     try {
-      await fsp.writeFile(absPath, pending.data, pending.encoding ? { encoding: pending.encoding } : undefined);
-      lastWriteTime.set(absPath, Date.now());
+      await writePending(absPath, pending);
     } catch (err) {
       console.error('[write-coalesce] flush failed:', absPath, err.message);
     }
@@ -87,6 +103,26 @@ function scheduleFlush(absPath) {
 
 function getPendingContent(absPath) {
   return pendingWrites.get(absPath) || null;
+}
+
+// Before a rename/copy/rmdir touches absPath (or anything under it), write
+// out what is still buffered there, so the operation sees current content.
+async function flushPendingUnder(absPath) {
+  const prefix = absPath + path.sep;
+  for (const [p, entry] of [...pendingWrites]) {
+    if (p !== absPath && !p.startsWith(prefix)) continue;
+    pendingWrites.delete(p);
+    if (entry.timer) clearTimeout(entry.timer);
+    try { await writePending(p, entry); } catch (err) { console.error('[write-coalesce] flush failed:', p, err.message); }
+  }
+}
+
+// A deleted file must not be re-created by a buffered write flushing later.
+function dropPending(absPath) {
+  const entry = pendingWrites.get(absPath);
+  if (!entry) return;
+  if (entry.timer) clearTimeout(entry.timer);
+  pendingWrites.delete(absPath);
 }
 
 // Flush all pending writes on shutdown (async with timeout so slow
@@ -114,8 +150,32 @@ async function flushAllPending() {
 process.on('SIGTERM', () => flushAllPending().finally(() => process.exit(0)));
 process.on('SIGINT', () => flushAllPending().finally(() => process.exit(0)));
 
-function createFsRouter(vaultRegistry, fallbackVaultRoot) {
+// hooks.onRename(vaultId, oldRel, newRel)  share links follow renames
+// hooks.events                             api/vault-events.js hub: every
+//                                          change is published to the other
+//                                          sessions watching the vault
+function createFsRouter(vaultRegistry, fallbackVaultRoot, hooks = {}) {
   const router = express.Router();
+  const events = hooks.events || null;
+
+  // The session making the request (capacitor-shim, markport-sync), so it
+  // isn't sent its own change back.
+  function clientOf(req) {
+    const c = (req.query && req.query.client) || (req.body && req.body.client);
+    return typeof c === 'string' && c ? c.slice(0, 100) : null;
+  }
+
+  function publish(req, abs, type, meta) {
+    if (events) events.publish(abs, type, clientOf(req), meta);
+  }
+
+  async function publishFile(req, abs, type) {
+    if (!events) return;
+    try {
+      const s = await fsp.stat(abs);
+      publish(req, abs, s.isDirectory() ? (type === 'add' ? 'addDir' : 'unlinkDir') : type, { mtime: s.mtime.getTime(), size: s.size });
+    } catch (_) { /* gone again already */ }
+  }
 
   function getVaultRoot(req) {
     const vaultId = req.query.vault || (req.body && req.body.vault);
@@ -129,6 +189,18 @@ function createFsRouter(vaultRegistry, fallbackVaultRoot) {
       return vault.path;
     }
     return fallbackVaultRoot;
+  }
+
+  // Resource URLs (<img src>, audio, PDF) are assembled by Obsidian itself,
+  // not by our shim: it takes the storage-root URI Filesystem.getUri({path:''})
+  // returned ("/api/fs/read?vault=<id>&path=") and appends
+  // "/<basePath>/<file>", where basePath is the vault id - the same prefix
+  // capacitor-shim's fullPath() strips from every other call. Without this,
+  // every embedded image resolved to <vault>/<id>/<file> and 404'd.
+  function stripResourcePrefix(req, relPath) {
+    const id = req.query.vault;
+    const prefix = id ? '/' + id + '/' : null;
+    return prefix && relPath.startsWith(prefix) ? relPath.slice(prefix.length) : relPath;
   }
 
   // Resolve a path relative to the vault root, ensuring it stays inside.
@@ -160,6 +232,19 @@ function createFsRouter(vaultRegistry, fallbackVaultRoot) {
     };
   }
 
+  // A buffered write is the file's current content: report its mtime and
+  // size, not what is still on disk, or a session that compares stats
+  // (markport-sync) would miss the change.
+  async function statWithPending(target) {
+    const out = serializeStats(await fsp.stat(target));
+    const pending = getPendingContent(target);
+    if (pending) {
+      out.mtime = pending.mtime;
+      out.size = pendingSize(pending);
+    }
+    return out;
+  }
+
   function handleError(res, err) {
     // ENOTDIR (readdir on a file) and EISDIR (read on a directory) are
     // routine "wrong shape" errors that Obsidian handles via try/catch.
@@ -170,6 +255,7 @@ function createFsRouter(vaultRegistry, fallbackVaultRoot) {
       : err.code === 'EISDIR' ? 404
       : err.code === 'ENOTDIR' ? 404
       : err.code === 'ENOVAULT' ? 404
+      : err.code === 'EEXIST' ? 409
       : 500;
     res.status(status).json({
       error: err.message,
@@ -196,14 +282,7 @@ function createFsRouter(vaultRegistry, fallbackVaultRoot) {
         }
       }
 
-      const pending = getPendingContent(target);
-      const stats = await fsp.stat(target);
-      // If there's a pending write, override mtime so the client sees fresh data.
-      if (pending) {
-        stats.mtime = new Date(pending.mtime);
-        stats.mtimeMs = pending.mtime;
-      }
-      res.json(serializeStats(stats));
+      res.json(await statWithPending(target));
     } catch (err) {
       // Synthesize a directory stat for .obsidian/plugins when the vault
       // doesn't have it yet — otherwise Obsidian's plugin discovery aborts
@@ -329,7 +408,7 @@ function createFsRouter(vaultRegistry, fallbackVaultRoot) {
   // Read a file (text or binary depending on ?encoding).
   router.get('/read', async (req, res) => {
     try {
-      const relPath = req.query.path || '';
+      const relPath = stripResourcePrefix(req, req.query.path || '');
       const target = resolveSafe(req, relPath);
       const encoding = req.query.encoding || null;
 
@@ -421,20 +500,31 @@ function createFsRouter(vaultRegistry, fallbackVaultRoot) {
       }
 
       await fsp.mkdir(path.dirname(target), { recursive: true });
+      const existed = await fileExists(target);
+      const type = existed ? 'change' : 'add';
 
       // If this file was written recently, coalesce instead of hitting disk.
       if (shouldCoalesce(target)) {
-        pendingWrites.set(target, { data, encoding, timer: null, mtime: Date.now() });
+        const entry = { data, encoding, timer: null, mtime: Date.now(), events };
+        pendingWrites.set(target, entry);
         scheduleFlush(target);
         invalidateBootstrapCache(req.query.vault);
-        res.json({ ok: true });
+        const meta = { mtime: entry.mtime, size: pendingSize(entry) };
+        publish(req, target, type, meta);
+        res.json(Object.assign({ ok: true }, meta));
         return;
       }
 
+      dropPending(target);
       await fsp.writeFile(target, data, encoding ? { encoding } : undefined);
       lastWriteTime.set(target, Date.now());
       invalidateBootstrapCache(req.query.vault);
-      res.json({ ok: true });
+      // mtime/size as /stat reports them, so a client can record what it
+      // wrote without another round trip (markport-sync does).
+      const s = await fsp.stat(target);
+      const meta = { mtime: s.mtime.getTime(), size: s.size };
+      publish(req, target, type, meta);
+      res.json(Object.assign({ ok: true }, meta));
     } catch (err) {
       handleError(res, err);
     }
@@ -444,8 +534,10 @@ function createFsRouter(vaultRegistry, fallbackVaultRoot) {
     try {
       const target = resolveSafe(req, req.body.path || '');
       const recursive = req.body.recursive !== false;
+      const existed = await fileExists(target);
       await fsp.mkdir(target, { recursive });
       invalidateBootstrapCache(req.body.vault);
+      if (!existed) publish(req, target, 'addDir');
       res.json({ ok: true });
     } catch (err) {
       handleError(res, err);
@@ -455,36 +547,58 @@ function createFsRouter(vaultRegistry, fallbackVaultRoot) {
   router.delete('/unlink', async (req, res) => {
     try {
       const target = resolveSafe(req, req.query.path || '');
+      dropPending(target);
       await fsp.unlink(target);
       invalidateBootstrapCache(req.query.vault);
+      publish(req, target, 'unlink');
       res.json({ ok: true });
     } catch (err) {
       handleError(res, err);
     }
   });
 
-  router.delete('/rmdir', async (req, res) => {
+  // The client shim sends rmdir as POST with a JSON body (like mkdir); the
+  // DELETE form with query parameters is kept for older callers.
+  async function rmdir(req, res, relPath, recursive) {
     try {
-      const target = resolveSafe(req, req.query.path || '');
-      const recursive = req.query.recursive === '1';
+      const target = resolveSafe(req, relPath || '');
+      if (target === path.resolve(getVaultRoot(req))) throw Object.assign(new Error('refusing to remove the vault root'), { code: 'EACCES' });
       if (recursive) {
+        for (const p of [...pendingWrites.keys()]) if (p.startsWith(target + path.sep)) dropPending(p);
         await fsp.rm(target, { recursive: true, force: false });
       } else {
         await fsp.rmdir(target);
       }
-      invalidateBootstrapCache(req.query.vault);
+      invalidateBootstrapCache(req.query.vault || (req.body && req.body.vault));
+      publish(req, target, 'unlinkDir');
       res.json({ ok: true });
     } catch (err) {
       handleError(res, err);
     }
-  });
+  }
+  router.delete('/rmdir', (req, res) => rmdir(req, res, req.query.path, req.query.recursive === '1'));
+  router.post('/rmdir', express.json(), (req, res) => rmdir(req, res, req.body && req.body.path, !!(req.body && req.body.recursive)));
 
   router.post('/rename', express.json(), async (req, res) => {
     try {
       const oldPath = resolveSafe(req, req.body.oldPath || '');
       const newPath = resolveSafe(req, req.body.newPath || '');
+      // overwrite:false - fail instead of replacing an existing target
+      // (markport-sync renames with this; Obsidian's own renames don't send it).
+      if (req.body.overwrite === false && oldPath !== newPath && await fileExists(newPath)) {
+        throw Object.assign(new Error('target exists: ' + req.body.newPath), { code: 'EEXIST' });
+      }
+      await flushPendingUnder(oldPath);
+      const wasDir = (await fsp.stat(oldPath)).isDirectory();
+      await fsp.mkdir(path.dirname(newPath), { recursive: true });
       await fsp.rename(oldPath, newPath);
       invalidateBootstrapCache(req.body.vault);
+      if (hooks.onRename && req.body.vault) {
+        try { hooks.onRename(req.body.vault, req.body.oldPath, req.body.newPath); }
+        catch (err) { console.error('[fs] rename hook failed:', err.message); }
+      }
+      publish(req, oldPath, wasDir ? 'unlinkDir' : 'unlink');
+      await publishFile(req, newPath, 'add');
       res.json({ ok: true });
     } catch (err) {
       handleError(res, err);
@@ -495,9 +609,46 @@ function createFsRouter(vaultRegistry, fallbackVaultRoot) {
     try {
       const src = resolveSafe(req, req.body.src || '');
       const dest = resolveSafe(req, req.body.dest || '');
+      await flushPendingUnder(src);
+      const existed = await fileExists(dest);
       await fsp.copyFile(src, dest);
       invalidateBootstrapCache(req.body.vault);
+      await publishFile(req, dest, existed ? 'change' : 'add');
       res.json({ ok: true });
+    } catch (err) {
+      handleError(res, err);
+    }
+  });
+
+  // The whole vault (or one folder of it) in one response: every file with
+  // its mtime and size, and every folder. Hidden entries (".obsidian",
+  // ".trash", dotfiles) are left out, as the watcher leaves them out.
+  // markport-sync compares this against its last sync to find changes.
+  router.get('/tree', async (req, res) => {
+    try {
+      const rel = String(req.query.path || '').replace(/^\/+|\/+$/g, '');
+      const root = resolveSafe(req, rel);
+      const files = [];
+      const dirs = [];
+      async function walk(abs, relDir) {
+        const entries = await safeReaddir(abs);
+        await Promise.all(entries.map(async (e) => {
+          if (e.name.startsWith('.')) return;
+          const childRel = relDir ? relDir + '/' + e.name : e.name;
+          const childAbs = path.join(abs, e.name);
+          let st;
+          try { st = await statWithPending(childAbs); } catch (_) { return; }   // vanished, broken link
+          if (st.isDirectory) {
+            if (e.isSymbolicLink()) return;   // could loop; Obsidian doesn't follow them either
+            dirs.push(childRel);
+            await walk(childAbs, childRel);
+          } else if (st.isFile) {
+            files.push({ path: childRel, mtime: st.mtime, size: st.size });
+          }
+        }));
+      }
+      await walk(root, rel);
+      res.json({ files, dirs });
     } catch (err) {
       handleError(res, err);
     }

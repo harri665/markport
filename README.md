@@ -25,7 +25,8 @@ Markport loads Obsidian's original renderer (`app.js`) completely unmodified - z
 - Bidirectional links and backlinks
 - Search and command palette
 - Core plugins (file explorer, tags, bookmarks, outgoing links, etc.)
-- Real-time sync across tabs via WebSocket - **Node.js server mode only** (`/api/watch`); not available in the client-only (OPFS) deployment, which has no server to push events from
+- Real-time sync across tabs, browsers and devices via WebSocket - **Node.js server mode only** (`/api/watch`); every change is pushed to the other sessions as soon as the server has it. Not available in the client-only (OPFS) deployment, which has no server to push events from
+- The native Obsidian app (desktop or mobile) as one more live session, via the **Markport Sync** plugin (`src/native-plugins/markport-sync/`): it syncs any or all server vaults into a local vault, both ways
 - RTL / Unicode support
 
 ### Fast bootstrap (Node.js server mode)
@@ -83,7 +84,11 @@ src/                         our source code
 │   └── server/              Node.js HTTP/WS backend
 ├── sync-server/             optional pull-sync server (/sync/v1, SYNC_TOKEN) - separate from
 │                             the runtime-server backend above, see src/sync-server/README.md
-├── plugins/                 system plugin overlay (e.g. obsidian-web-layout)
+├── plugins/                 system plugin overlay (e.g. obsidian-web-layout, markport-clipper)
+├── native-plugins/          plugins for the native Obsidian app, NOT overlaid onto vaults:
+│                             markport-sync syncs it live with the server's vaults
+├── browser-extension/       Markport Clipper: click images on any page to save them into a
+│                             vault in Markport or desktop Obsidian, see its README.md
 └── deployments/             provider-specific deployments
     └── cloudflare/          client-only static deployment (OPFS) + a small edge Worker -
                               no server-side vault storage of any kind
@@ -181,6 +186,28 @@ Server environment variables:
 - `VAULT_REGISTRY`: recent-vault registry JSON path, default `user-data/registry.json`.
 - `VAULTS_DIR`: optional. Every top-level folder in it is registered as a vault at startup, so it appears on the start screen. Used by the Docker image (`/data/vaults`).
 - `DEFAULT_VAULT_NAME`: vault folder created in `VAULTS_DIR` when it has none, default `Notes`.
+- `MARKPORT_PASSWORD`: optional owner password. When set, the app asks for it at `/login` and every vault and API needs it; share links (below) are the only way in without it. When unset there is no login, so keep the server behind an authenticating proxy.
+
+### Sharing a note or folder
+
+In a server vault, right-click a note or folder and choose **Share…** (the built-in
+`markport-share` system plugin). The link, `/s/<id>`, opens a static page rendered on the
+server with Obsidian's styling and your theme. Notes can link to each other, and embedded
+images can live elsewhere in the vault. The page runs no JavaScript.
+
+- **View only**: the static page.
+- **Can edit**: the page also has **Open in editor**, the full Obsidian editor limited to that
+  note, or to that folder and its subfolders. Recipients don't need an account.
+- Optional **password** and **expiry date**. Links can be revoked from the same dialog, or with
+  **Manage shared links** in the command palette.
+
+The server enforces the limit on every request: file reads, writes, listings and the change
+watcher. A share can't reach other notes, other vaults, your settings or plugins, or the
+owner-only APIs. Recipients get their own settings folder, and plugins are disabled in shares.
+Images and other attachments that shared notes embed are visible read-only, under **Linked
+files**. Notes a recipient deletes go to a trash folder for that share, outside the vault.
+Shares and their data live next to the vault registry (`shares.json`, `shares/<id>/`).
+Browser-storage and local-folder vaults can't be shared, because they exist in only one browser.
 
 ### Bootstrap configuration
 
@@ -280,13 +307,13 @@ Without Docker, the Node.js server (`src/runtime-server/server/`) can be deploye
 1. Clone the repo and run `node scripts/update-obsidian-mobile.js --version 1.12.7 && node scripts/patch-obsidian-mobile.js` to get Obsidian's renderer files
 2. `cd src/runtime-server/server && npm install && npm start`
 3. Put it behind a reverse proxy (nginx, Caddy, Cloudflare Tunnel) with HTTPS
-4. Do not expose the server directly to the internet without auth - there is no application-level authentication
+4. Set `MARKPORT_PASSWORD`, or put authentication in the proxy. Without either, anyone who can reach the server can open every vault
 
 ## Notes
 
 - Obsidian's extracted files are treated as third-party artifacts. Do not edit files under `vendor/obsidian-mobile/`; update wrappers/shims instead.
 - The default vault is `user-data/demo-vault/`.
-- Do not bind the server to a public IP without a tunnel or auth layer in front.
+- Do not bind the server to a public IP without HTTPS in front, and without `MARKPORT_PASSWORD` or an auth layer.
 - See `docs/architecture.md` for the current architecture and design principles.
 - `vendor/obsidian-desktop/` and `scripts/update-obsidian-desktop.js` (the legacy desktop renderer + its
   downloader) are **vestigial** - the server no longer serves any route from them (removed

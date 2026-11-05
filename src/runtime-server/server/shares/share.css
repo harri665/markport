@@ -1,0 +1,166 @@
+/* Layout for share pages, on top of Obsidian's app.css (+ the owner's theme).
+   Uses Obsidian's own CSS variables so themes carry through. */
+
+body.mp-share-page {
+  margin: 0;
+  overflow: auto;
+  height: auto;
+  min-height: 100vh;
+  background: var(--background-primary);
+  color: var(--text-normal);
+  font-family: var(--font-interface);
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.mp-share {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+.mp-share-header {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 16px;
+  min-height: 44px;
+  box-sizing: border-box;
+  background: var(--background-secondary);
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.mp-share-crumbs {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+}
+.mp-share-crumbs a { color: var(--text-muted); text-decoration: none; }
+.mp-share-crumbs a:hover { color: var(--text-normal); }
+.mp-share-crumbs .mp-sep { margin: 0 6px; color: var(--text-faint); }
+.mp-share-crumbs .mp-current { color: var(--text-normal); }
+
+.mp-badge {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-faint);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s);
+  padding: 1px 6px;
+  white-space: nowrap;
+}
+
+a.mp-button, .mp-form button {
+  display: inline-flex;
+  align-items: center;
+  height: var(--input-height, 30px);
+  padding: 0 14px;
+  border-radius: var(--button-radius, var(--radius-s));
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  font-size: var(--font-ui-small);
+  font-weight: var(--font-semibold, 600);
+  text-decoration: none;
+  white-space: nowrap;
+  border: none;
+  cursor: pointer;
+}
+a.mp-button:hover, .mp-form button:hover { background: var(--interactive-accent-hover); }
+
+.mp-share-body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+.mp-share-nav {
+  width: 260px;
+  flex: none;
+  box-sizing: border-box;
+  padding: 12px 8px 24px;
+  background: var(--background-secondary);
+  border-right: 1px solid var(--background-modifier-border);
+  font-size: var(--font-ui-small);
+  position: sticky;
+  top: 44px;
+  align-self: flex-start;
+  max-height: calc(100vh - 44px);
+  overflow: auto;
+}
+.mp-tree, .mp-tree ul { list-style: none; margin: 0; padding: 0; }
+.mp-tree ul { padding-left: 14px; border-left: 1px solid var(--background-modifier-border); margin-left: 7px; }
+.mp-tree li { margin: 0; }
+.mp-tree summary, .mp-tree a {
+  display: block;
+  padding: 3px 8px;
+  border-radius: var(--radius-s);
+  color: var(--nav-item-color, var(--text-muted));
+  text-decoration: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.mp-tree summary { font-weight: var(--font-medium, 500); }
+.mp-tree a:hover, .mp-tree summary:hover { background: var(--nav-item-background-hover, var(--background-modifier-hover)); color: var(--text-normal); }
+.mp-tree a.is-active { background: var(--nav-item-background-active, var(--background-modifier-active-hover)); color: var(--text-normal); }
+.mp-tree .mp-ext { color: var(--text-faint); font-size: var(--font-ui-smaller); margin-left: 4px; }
+
+.mp-share-content {
+  flex: 1;
+  min-width: 0;
+  height: auto !important;
+  overflow: visible !important;
+}
+.mp-share-content .markdown-preview-view {
+  height: auto;
+  overflow: visible;
+  padding: 32px 32px 80px;
+  box-sizing: border-box;
+}
+.mp-share-content .markdown-preview-sizer {
+  max-width: var(--file-line-width, 700px);
+  margin: 0 auto;
+}
+
+.mp-listing { list-style: none; padding: 0; }
+.mp-listing li { padding: 4px 0; }
+.mp-listing a { text-decoration: none; }
+.mp-listing .mp-folder::before { content: "\1F4C1  "; }
+
+.math { font-family: var(--font-monospace); font-size: 0.92em; color: var(--text-muted); }
+.math-block { display: block; white-space: pre-wrap; margin: 1em 0; padding: 8px 12px; background: var(--background-secondary); border-radius: var(--radius-s); }
+.markdown-embed-link { font-size: var(--font-ui-smaller); color: var(--text-faint); }
+.internal-embed img { max-width: 100%; }
+
+/* Message pages: not found, password, login. */
+.mp-card {
+  max-width: 380px;
+  margin: 15vh auto 0;
+  padding: 28px;
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-l, 12px);
+}
+.mp-card h1 { margin: 0 0 8px; font-size: 1.3em; }
+.mp-card p { color: var(--text-muted); margin: 0 0 16px; }
+.mp-form { display: flex; flex-direction: column; gap: 12px; }
+.mp-form label { display: flex; flex-direction: column; gap: 6px; font-size: var(--font-ui-small); color: var(--text-muted); }
+.mp-form input[type=password] { height: 34px; padding: 0 10px; font-size: 1em; }
+.mp-form button { justify-content: center; height: 34px; }
+.mp-error { color: var(--text-error) !important; margin: 0 !important; font-size: var(--font-ui-small); }
+
+.mp-nav-toggle { display: none; }
+
+@media (max-width: 760px) {
+  .mp-share-body { flex-direction: column; }
+  .mp-share-nav { width: auto; position: static; max-height: none; border-right: none; border-bottom: 1px solid var(--background-modifier-border); }
+  .mp-nav-toggle { display: list-item; padding: 4px 8px; color: var(--text-muted); cursor: pointer; }
+  .mp-share-content .markdown-preview-view { padding: 20px 16px 60px; }
+}

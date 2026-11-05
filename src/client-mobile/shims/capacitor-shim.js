@@ -99,9 +99,17 @@
     return params.get('vault') || localStorage.getItem('obsidian-web:lastVaultId') || '';
   }
 
+  // This tab's session id. The server tags every change this tab makes with
+  // it and pushes the change live to every OTHER session on the vault (other
+  // tabs, devices, the native markport-sync plugin) - but not back to this
+  // one, which already knows (runtime-server api/vault-events.js).
+  const CLIENT_ID = 'web-' + ((window.crypto && crypto.randomUUID)
+    ? crypto.randomUUID()
+    : Date.now().toString(36) + Math.random().toString(36).slice(2));
+
   function vaultQuery() {
     const id = getVaultId();
-    return id ? 'vault=' + encodeURIComponent(id) + '&' : '';
+    return (id ? 'vault=' + encodeURIComponent(id) + '&' : '') + 'client=' + encodeURIComponent(CLIENT_ID) + '&';
   }
 
   function encodePath(p) {
@@ -181,6 +189,47 @@
     if (window.__owCacheInvalidation && window.__owCacheInvalidation.invalidateCacheSubtree) {
       window.__owCacheInvalidation.invalidateCacheSubtree(window.__owBootstrapCache, prefix);
     }
+  }
+
+  // ── External-change watcher (/api/watch WebSocket) ────────────────────
+  // The server sends vault-relative paths ("img/a.png"). Obsidian's
+  // CapacitorAdapter.watch listener strips its basePath - the vault id - off
+  // the FRONT of every event path (`e.path.substr(basePath.length)`), the
+  // mirror image of fullPath() above. Handing it the bare relative path cut
+  // the first 16 characters off every name, so external adds (an image saved
+  // into the folder by another program) never showed until a reload.
+  const WATCH_EVENTS = { add: 1, change: 1, unlink: 1, addDir: 1, unlinkDir: 1 };
+
+  function openWatchSocket(state) {
+    const vaultId = getVaultId();
+    const ws = new WebSocket((location.protocol === 'https:' ? 'wss:' : 'ws:') +
+      '//' + location.host + '/api/watch?vault=' + encodeURIComponent(vaultId) +
+      '&client=' + encodeURIComponent(CLIENT_ID));
+    state.ws = ws;
+    ws.onopen = () => { state.retries = 0; };
+    ws.onmessage = (ev) => {
+      let msg;
+      try { msg = JSON.parse(ev.data); } catch (_) { return; }
+      if (!WATCH_EVENTS[msg.type] || typeof msg.path !== 'string' || !msg.path) return;
+      // Invalidate first, so the stat() Obsidian makes in response reads disk,
+      // not the bootstrap cache.
+      if (msg.type === 'addDir' || msg.type === 'unlinkDir') invalidateCacheSubtree(msg.path);
+      else invalidateCacheEntry(msg.path);
+      const eventPath = vaultId ? vaultId + '/' + msg.path : msg.path;
+      state._listeners.forEach((cb) => {
+        try { cb({ path: eventPath }); } catch (e) { console.error('[watch] listener failed:', e); }
+      });
+    };
+    // A dropped socket (server restart, network blip, laptop sleep) used to
+    // end live updates until a reload. Reconnect with backoff; Obsidian's
+    // listeners live on `state`, so they carry over.
+    ws.onclose = () => {
+      if (window.__owCapacitorWatcher !== state) return;   // stopWatch() closed it
+      const delay = Math.min(30000, 1000 * Math.pow(2, state.retries++));
+      state.timer = setTimeout(() => {
+        if (window.__owCapacitorWatcher === state) openWatchSocket(state);
+      }, delay);
+    };
   }
 
   // Convert our server's readdir array to Capacitor's expected format.
@@ -317,7 +366,7 @@
       const res = await fetch('/api/fs/mkdir', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path: p, recursive: opts.recursive || false, vault: getVaultId() }),
+        body: JSON.stringify({ path: p, recursive: opts.recursive || false, vault: getVaultId(), client: CLIENT_ID }),
       });
       if (!res.ok) {
         const json = await res.json().catch(() => ({}));
@@ -334,7 +383,7 @@
       const res = await fetch('/api/fs/rmdir', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path: p, recursive: opts.recursive || false, vault: getVaultId() }),
+        body: JSON.stringify({ path: p, recursive: opts.recursive || false, vault: getVaultId(), client: CLIENT_ID }),
       });
       if (!res.ok) {
         const json = await res.json().catch(() => ({}));
@@ -417,7 +466,7 @@
       const res = await fetch('/api/fs/rename', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ oldPath: from, newPath: to, vault: getVaultId() }),
+        body: JSON.stringify({ oldPath: from, newPath: to, vault: getVaultId(), client: CLIENT_ID }),
       });
       if (!res.ok) {
         const json = await res.json().catch(() => ({}));
@@ -436,7 +485,7 @@
       const res = await fetch('/api/fs/copy', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ src: from, dest: to, vault: getVaultId() }),
+        body: JSON.stringify({ src: from, dest: to, vault: getVaultId(), client: CLIENT_ID }),
       });
       if (!res.ok) {
         const json = await res.json().catch(() => ({}));
@@ -517,34 +566,20 @@
     // Watch API — Obsidian mobile uses these to detect external file changes.
     // We bridge to our existing WebSocket at /api/watch.
     async startWatch(opts) {
-      const vaultId = getVaultId();
       if (!window.__owCapacitorWatcher) {
-        const wsUrl = (location.protocol === 'https:' ? 'wss:' : 'ws:') +
-          '//' + location.host + '/api/watch?vault=' + encodeURIComponent(vaultId);
-        const ws = new WebSocket(wsUrl);
-        ws.onmessage = (ev) => {
-          try {
-            const msg = JSON.parse(ev.data);
-            if (msg.type === 'change' || msg.type === 'add' || msg.type === 'unlink') {
-              // External (chokidar) write — invalidate cache so subsequent
-              // reads pick up the new content/mtime instead of stale cache.
-              invalidateCacheEntry(msg.path);
-              window.__owCapacitorWatcher._listeners.forEach((cb) => {
-                cb({ path: msg.path });
-              });
-            }
-          } catch (_) { }
-        };
-        ws.onclose = () => { window.__owCapacitorWatcher = null; };
-        window.__owCapacitorWatcher = { ws, _listeners: new Set() };
+        const state = { ws: null, _listeners: new Set(), retries: 0, timer: null };
+        window.__owCapacitorWatcher = state;
+        openWatchSocket(state);
       }
       return {};
     },
 
     async stopWatch() {
-      if (window.__owCapacitorWatcher) {
-        window.__owCapacitorWatcher.ws.close();
-        window.__owCapacitorWatcher = null;
+      const state = window.__owCapacitorWatcher;
+      if (state) {
+        window.__owCapacitorWatcher = null;   // first, so onclose won't reconnect
+        clearTimeout(state.timer);
+        if (state.ws) state.ws.close();
       }
       return {};
     },

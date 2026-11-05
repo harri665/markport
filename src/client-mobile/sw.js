@@ -206,6 +206,10 @@ self.addEventListener('fetch', (e) => {
   if (url.origin !== self.location.origin) return;        // cross-origin (CouchDB/GitHub) → pass-through
   if (url.pathname.startsWith('/api/')) return;           // dynamic → network-only
   if (url.pathname === '/sw.js') return;                  // ה-SW עצמו — לעולם לא מ-cache (שהדפדפן יזהה גרסה חדשה)
+  // Share pages (/s/<id>/...) and the owner login are server-rendered,
+  // per-link and revocable: never cache them, and never let one become the
+  // cached app shell below.
+  if (url.pathname.startsWith('/s/') || url.pathname === '/login' || url.pathname === '/logout') return;
 
   // /_owres/ — vault resource serving (OPFS/folder binaries), MUST be before
   // navigate/static so it's never swallowed by either branch below (§3ה).
@@ -223,7 +227,9 @@ self.addEventListener('fetch', (e) => {
     e.respondWith(
       fetch(req)
         .then((res) => {
-          if (res && res.status === 200) {
+          // !redirected: a logged-out '/' redirects to /login - that page must
+          // not be stored as the shell.
+          if (res && res.status === 200 && !res.redirected) {
             const copy = res.clone();
             caches.open(CACHE).then((c) => c.put('/', copy));   // canonical shell under '/'
           }

@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Markport Clipper - Settings</title>
+<style>
+  body { font: 14px/1.5 system-ui, sans-serif; max-width: 600px; margin: 32px auto; padding: 0 16px; color: #222; }
+  h1 { font-size: 20px; }
+  h2 { font-size: 16px; margin-top: 28px; }
+  textarea { width: 100%; min-height: 80px; font: 13px ui-monospace, monospace; padding: 8px; box-sizing: border-box; }
+  button { padding: 6px 14px; margin-top: 8px; }
+  .note { color: #666; font-size: 13px; }
+  #status { margin-left: 10px; color: #2e7d32; }
+  #status.err { color: #b3261e; }
+  #found { margin: 12px 0 0; padding-left: 0; list-style: none; }
+  #found li { margin: 6px 0; }
+  #found .ok::before { content: "\2713  "; color: #2e7d32; font-weight: 600; }
+  #found .bad::before { content: "\00d7  "; color: #b3261e; font-weight: 600; }
+  #found .bad .detail { color: #8a1c14; }
+  #found .head { font-weight: 600; margin-top: 14px; }
+  #found .err { color: #b3261e; }
+</style>
+</head>
+<body>
+<h1>Markport Clipper</h1>
+<p>Saves images you click on web pages into a vault: one open in desktop Obsidian, or one open in a Markport tab.
+Either way the vault needs the <b>Markport - Image Clipper</b> plugin.</p>
+
+<h2>Obsidian (desktop app)</h2>
+<p>Pairing keys, one per line. Find a vault's key in Obsidian under Settings &gt; Markport - Image Clipper &gt; Pairing key.</p>
+<textarea id="keys" spellcheck="false" placeholder="48-character pairing key"></textarea>
+
+<h2>Markport</h2>
+<p>Addresses where you open Markport, one per line.</p>
+<textarea id="origins" spellcheck="false"></textarea>
+<p class="note">Only the origin counts (scheme, host and port): <code>https://notes.example.com/vault/abc</code> is stored as <code>https://notes.example.com</code>.</p>
+
+<h2>Dragging</h2>
+<label><input type="checkbox" id="dragPopup"> Show the folder menu next to the pointer when I drag an image, so I can drop it into a folder</label>
+<p class="note">Takes effect on pages opened or reloaded after the change.</p>
+
+<div><button id="save">Save</button> <button id="check">Find vaults</button><span id="status"></span></div>
+<ul id="found"></ul>
+
+<script src="lib.js"></script>
+<script src="options.js"></script>
+</body>
+</html>

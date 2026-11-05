@@ -1,0 +1,9 @@
+{
+  "id": "markport-sync",
+  "name": "Markport Sync",
+  "version": "0.1.0",
+  "minAppVersion": "1.4.0",
+  "description": "Live two-way sync with the vaults on a Markport server. Edits made here show up in every open Markport tab within a second, and theirs show up here.",
+  "author": "Markport",
+  "isDesktopOnly": false
+}

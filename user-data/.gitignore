@@ -3,3 +3,6 @@ registry.json
 
 # Demo vault — track content, ignore Obsidian's local state
 demo-vault/.obsidian/
+session-secret
+shares.json
+shares.json.tmp

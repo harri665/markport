@@ -118,6 +118,54 @@ test('bootstrap cache HIT sends pre-compressed Content-Encoding header', async (
   assert.ok(hotBody.fs, 'HIT response should still have fs section');
 });
 
+test('bootstrap merges system plugin ids into an existing community-plugins.json, as /api/fs/read does', async (t) => {
+  const tmp = await fsp.mkdtemp(path.join(os.tmpdir(), 'obsidian-web-bootstrap-'));
+  t.after(() => fsp.rm(tmp, { recursive: true, force: true }));
+  const vaultPath = await makeVaultFixture(tmp);
+  // What Obsidian leaves behind after the first open: system ids stripped.
+  await fsp.writeFile(path.join(vaultPath, '.obsidian', 'community-plugins.json'), '["user-plugin"]');
+
+  const systemPlugins = require('../system-plugins');
+  systemPlugins.init();
+  const systemIds = systemPlugins.getSystemPluginIds();
+  assert.ok(systemIds.length > 0, 'repo should ship at least one system plugin');
+
+  const server = await startTestServer({
+    clientPath: path.join(tmp, 'client'),
+    obsidianPath: path.join(tmp, 'obsidian'),
+    registryPath: path.join(tmp, 'vaults.json'),
+    vaultPath,
+  });
+  t.after(server.close);
+
+  const openRes = await fetch(server.baseUrl + '/api/vaults/open', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path: vaultPath, create: false }),
+  });
+  const { id: vaultId } = await openRes.json();
+  serverCache.delete(vaultId);
+
+  const body = await (await fetch(`${server.baseUrl}/api/bootstrap?vault=${vaultId}`)).json();
+  const entry = body.fs['.obsidian/community-plugins.json'];
+  const list = JSON.parse(entry.content);
+  assert.deepEqual(list, ['user-plugin', ...systemIds]);
+  assert.equal(entry.size, Buffer.byteLength(entry.content));
+
+  const viaFs = await (await fetch(`${server.baseUrl}/api/fs/read?vault=${vaultId}&path=.obsidian/community-plugins.json&encoding=utf8`)).text();
+  assert.deepEqual(list, JSON.parse(viaFs), 'bootstrap and /api/fs/read must agree');
+
+  // The plugin folders are listed too: Obsidian finds plugins by listing
+  // .obsidian/plugins, and the client answers that from this response.
+  const listed = (body.dirs['.obsidian/plugins'] || []).map((e) => e.name);
+  for (const id of systemIds) {
+    assert.ok(listed.includes(id), id + ' should be listed in .obsidian/plugins');
+    const files = (body.dirs['.obsidian/plugins/' + id] || []).map((e) => e.name);
+    assert.ok(files.includes('manifest.json'), id + ' should list its manifest.json');
+    assert.equal(body.fs['.obsidian/plugins/' + id + '/manifest.json'].content, undefined, 'stats only: reads go to /api/fs/read');
+  }
+});
+
 test('BOOTSTRAP_DISABLED=true returns {disabled:true} without scanning', async (t) => {
   const tmp = await fsp.mkdtemp(path.join(os.tmpdir(), 'obsidian-web-bootstrap-'));
   t.after(() => fsp.rm(tmp, { recursive: true, force: true }));

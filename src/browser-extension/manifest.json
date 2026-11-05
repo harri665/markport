@@ -1,0 +1,26 @@
+{
+  "manifest_version": 3,
+  "name": "Markport Clipper",
+  "version": "0.3.0",
+  "description": "Save images and screenshots from any web page into a folder of your Markport vault.",
+  "background": { "service_worker": "background.js" },
+  "action": {
+    "default_title": "Markport Clipper: capture a screenshot or save an image (Alt+Shift+S)"
+  },
+  "commands": {
+    "toggle-picker": {
+      "suggested_key": { "default": "Alt+Shift+S" },
+      "description": "Start or stop capture mode"
+    }
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["lib.js", "find-image.js", "menu.js", "drag.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "options_page": "options.html",
+  "permissions": ["scripting", "contextMenus", "storage"],
+  "host_permissions": ["<all_urls>"]
+}
