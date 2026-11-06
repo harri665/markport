@@ -80,7 +80,15 @@ const MOBILE_SCRIPTS = [
   // עכשיו מקור-האמת ל-URL, גלוי ונשאר (ניתן-לשיתוף/סימניה) — לא תלוי יותר
   // באיזה path הגיש את הדף (CF/מקומי מגישים שניהם אותו shell). משמש הן ע"י
   // ה-Create-vault interceptor למטה והן ע"י הגישור native-vault-open (Bug 2b).
+  //
+  // window.__owLeavingPage latches once we've committed to leaving: a later
+  // navigation started by this same page (Obsidian's own failure handling ->
+  // openVaultChooser -> the 'starter' IPC, or a location.reload) would cancel
+  // this one, and the user lands back on /starter. That happened whenever the
+  // vault page didn't commit within ~100ms - more often in Edge/Safari than in
+  // a warm Chrome. Everything that navigates on this page checks the latch.
   function navigateToVault(id) {
+    window.__owLeavingPage = true;
     location.href = '/vault/' + encodeURIComponent(id);
   }
 
@@ -724,14 +732,23 @@ const MOBILE_SCRIPTS = [
         var id = owNativeVaultIdFromValue(value);
         if (id && id !== VAULT_ID) {
           navigateToVault(id);
-          return;
+          // Stop the caller. Every bundle path that writes this key goes on
+          // to open the vault in *this* page (the chooser's open function
+          // builds window.app; the switcher's setItem is followed by
+          // location.reload()). Here that open fails - this page has no
+          // vault - and its failure handler navigates back to /starter,
+          // cancelling the navigation above. Throwing ends that code before
+          // it starts; the page is being replaced anyway.
+          var stop = new Error('[obsidian-web] navigating to vault ' + id);
+          stop.owNavigatingAway = true;
+          throw stop;
         }
       }
       return origSetItem(key, value);
     };
     localStorage.removeItem = function (key) {
       if (key === 'mobile-selected-vault' && hadOpenVault) {
-        location.href = '/starter';
+        if (!window.__owLeavingPage) location.href = '/starter';
         return;
       }
       return origRemoveItem(key);

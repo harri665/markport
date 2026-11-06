@@ -524,11 +524,14 @@
         // *synchronous* IPC call; navigating mid-call, before sendSync even
         // returns `true` to its caller, would abandon whatever the caller
         // still does with that return value this same turn.
+        window.__owLeavingPage = true;   // see the 'starter' channel below
         setTimeout(() => { location.href = '/vault/' + encodeURIComponent(id); }, 0);
         return true;   // ⚠️ MUST be exactly `true` — `!0!==sendSync(...)` shows an error Notice otherwise.
       }
       if (channel === 'starter') {
-        location.href = '/starter';
+        // boot.js sets __owLeavingPage once it is navigating to a vault; going
+        // to /starter now would cancel that navigation (see navigateToVault).
+        if (!window.__owLeavingPage) location.href = '/starter';
         return null;
       }
       if (channel === 'help') {
