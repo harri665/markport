@@ -100,6 +100,23 @@ module.exports = {
     cacheDir: process.env.MARKPORT_MEDIA_CACHE ? path.resolve(PROJECT_ROOT, process.env.MARKPORT_MEDIA_CACHE) : null,
     maxBytes: (parseInt(process.env.MARKPORT_MEDIA_CACHE_MB || '5120', 10) || 5120) * 1024 * 1024,
   },
+  // MCP endpoint for apps like Claude (mcp/server.js), signed in with OAuth
+  // (mcp/oauth.js). Needs MARKPORT_PASSWORD.
+  mcp: {
+    enabled: process.env.MARKPORT_MCP !== 'false',
+    // The address apps reach this server at, e.g. https://notes.example.com.
+    // Default: worked out from each request (Host, X-Forwarded-Proto).
+    publicUrl: process.env.MARKPORT_PUBLIC_URL || '',
+    // Where the sign-in may send the browser back to (besides loopback).
+    redirectHosts: process.env.MARKPORT_OAUTH_REDIRECT_HOSTS || 'claude.ai,claude.com',
+    // Hosts whose client metadata documents are fetched (an app's client id
+    // is then the URL of that document).
+    clientHosts: process.env.MARKPORT_OAUTH_CLIENT_HOSTS || 'claude.ai,claude.com,anthropic.com',
+    // Refuse writes that add em/en dashes or emoji to notes.
+    plainPunctuation: process.env.MARKPORT_MCP_PLAIN_PUNCTUATION === 'true',
+    // Extra instructions for the app. Default: <data>/mcp-instructions.md.
+    instructionsFile: process.env.MARKPORT_MCP_INSTRUCTIONS_FILE ? path.resolve(PROJECT_ROOT, process.env.MARKPORT_MCP_INSTRUCTIONS_FILE) : '',
+  },
   bootstrap: {
     // Master switch. When false, /api/bootstrap returns { disabled: true }
     // immediately without scanning the vault. Useful for minimal deployments

@@ -37,6 +37,14 @@ services:
       # Image library cache (thumbnails, previews, web-optimized 3D models),
       # in /data/media-cache - never inside a vault. Size cap in MB.
       MARKPORT_MEDIA_CACHE_MB: ${MARKPORT_MEDIA_CACHE_MB:-5120}
+      # MCP endpoint for apps like Claude, at /mcp, signed in with OAuth.
+      # See "Connecting Claude" in the server README.
+      MARKPORT_MCP: ${MARKPORT_MCP:-true}
+      MARKPORT_PUBLIC_URL: ${MARKPORT_PUBLIC_URL:-}
+      MARKPORT_OAUTH_REDIRECT_HOSTS: ${MARKPORT_OAUTH_REDIRECT_HOSTS:-claude.ai,claude.com}
+      MARKPORT_OAUTH_CLIENT_HOSTS: ${MARKPORT_OAUTH_CLIENT_HOSTS:-claude.ai,claude.com,anthropic.com}
+      MARKPORT_MCP_PLAIN_PUNCTUATION: ${MARKPORT_MCP_PLAIN_PUNCTUATION:-false}
+      MARKPORT_MCP_INSTRUCTIONS_FILE: ${MARKPORT_MCP_INSTRUCTIONS_FILE:-}
     volumes:
       - ${MARKPORT_DATA:-markport-data}:/data
     # If your proxy runs as a container on a shared Docker network instead of

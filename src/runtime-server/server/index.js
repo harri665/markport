@@ -33,6 +33,8 @@ const VaultRegistry = require('./vault-registry');
 const { createAuth } = require('./auth');
 const { createSharing } = require('./shares');
 const { loginPage, pageHeaders } = require('./shares/html');
+const { createOAuth } = require('./mcp/oauth');
+const { createMcpRouter } = require('./mcp/server');
 
 // Only same-site paths may be redirect targets (no open redirect via ?next=).
 function safeLocalPath(p) {
@@ -174,6 +176,28 @@ function createApp(appConfig = {}) {
     auth.loginLimiter.reset(key);
     res.json(Object.assign({ authEnabled: true }, auth.issueApiToken()));
   });
+
+  // ── MCP for apps like Claude, with OAuth sign-in (mcp/) ──────────────────
+  if (appConfig.mcp && appConfig.mcp.enabled !== false) {
+    const m = appConfig.mcp;
+    const oauth = createOAuth({
+      auth,
+      dataDir,
+      publicUrl: m.publicUrl,
+      redirectHosts: m.redirectHosts,
+      cimdHosts: m.clientHosts,
+    });
+    app.use(oauth.router);
+    app.use('/mcp', createMcpRouter({
+      auth,
+      oauth,
+      dataDir,
+      plainPunctuation: !!m.plainPunctuation,
+      instructionsFile: m.instructionsFile,
+      version: require('./package.json').version,
+    }));
+    app.locals.oauth = oauth;
+  }
 
   // ── Share links (shares/pages.js) - public, scoped by the link ───────────
   app.use('/s', sharing.pages);

@@ -162,6 +162,47 @@ shared network). Set `MARKPORT_PASSWORD`, or protect the hostname with a Cloudfl
 Access policy (share links then need an Access bypass rule for `/s/*` and the app's
 files, so the password is simpler). WebSockets work through tunnels without extra settings.
 
+## Connecting Claude
+
+The server has an MCP endpoint at `/mcp`, so Claude (on claude.ai, the desktop app or Claude
+Code) can read, search and change your vaults. It needs `MARKPORT_PASSWORD`: you sign Claude in
+with it.
+
+1. On claude.ai, open **Customize > Connectors**, click **+ Add**, then **Add custom
+   connector**. On a Team or Enterprise plan an owner adds it under **Organization settings >
+   Connectors** first.
+2. Enter a name and the URL `https://<your host>/mcp`, and keep the sign-in settings Claude
+   detects.
+3. Click **Connect**. A Markport page says that Claude wants access and that you go back to
+   claude.ai. Enter your Markport password and click **Allow**.
+4. In a chat, turn the connector on with **+ > Connectors**.
+
+For Claude Code: `claude mcp add --transport http markport https://<your host>/mcp`, then
+`/mcp` in Claude Code to sign in.
+
+What Claude can do: list vaults and files, read notes (and images), search, write, edit, append,
+create folders, move, copy and delete. Delete moves things into the vault's `.trash/`, as
+Obsidian does. Every change goes through the same file API as the app, so open Obsidian sessions
+show it at once.
+
+Sign-in details:
+
+- Claude gets an access token for an hour and a refresh token for 90 days, renewed each time it
+  is used. Only the newest refresh token works.
+- **Connected apps** are listed at `/oauth/connections`. **Disconnect** there signs one out at
+  once. Changing `MARKPORT_PASSWORD` signs every app out.
+- The sign-in only sends the browser back to `MARKPORT_OAUTH_REDIRECT_HOSTS` (claude.ai and
+  claude.com) or to the computer you're on. A link from someone else can't send the code to
+  their site, even if you type your password.
+- Behind a proxy, Markport works out its own address from the `Host` header and
+  `X-Forwarded-Proto`. If sign-in fails with a wrong address (`http://` or an internal host
+  name), set `MARKPORT_PUBLIC_URL`.
+- If your proxy only lets in certain visitors, `/mcp`, `/oauth/*` and `/.well-known/oauth-*`
+  must be reachable from Anthropic's servers.
+
+Instructions for Claude, such as how you name notes, go in `/data/mcp-instructions.md`. Claude
+gets them each time it connects, and edits apply without a restart.
+
 ## Settings (`.env`)
 
 | Variable | Default | Meaning |
@@ -175,6 +216,12 @@ files, so the password is simpler). WebSockets work through tunnels without extr
 | `OBSIDIAN_VERSION` | `1.12.7` | Obsidian release to bundle; 1.13+ does not boot |
 | `MARKPORT_NODE_BRIDGE` | `false` | `true`: desktop-only plugins run their Node code in the container, and Claude Code is installed in the image. See below |
 | `MARKPORT_MEDIA_CACHE_MB` | `5120` | size cap of the image library's cache (`/data/media-cache`): thumbnails, previews and web-optimized 3D models. Never inside a vault; safe to delete |
+| `MARKPORT_MCP` | `true` | the MCP endpoint at `/mcp` (needs `MARKPORT_PASSWORD`). See [Connecting Claude](#connecting-claude) |
+| `MARKPORT_PUBLIC_URL` | *(from each request)* | the address apps reach the server at, e.g. `https://notes.example.com` |
+| `MARKPORT_OAUTH_REDIRECT_HOSTS` | `claude.ai,claude.com` | where the sign-in may send the browser back to; loopback is always allowed |
+| `MARKPORT_OAUTH_CLIENT_HOSTS` | `claude.ai,claude.com,anthropic.com` | hosts an app's client id may point to (a client metadata document) |
+| `MARKPORT_MCP_PLAIN_PUNCTUATION` | `false` | `true`: refuse writes through MCP that add em/en dashes or emoji to notes |
+| `MARKPORT_MCP_INSTRUCTIONS_FILE` | `/data/mcp-instructions.md` | instructions sent to the app when it connects |
 | `MARKPORT_IMAGEMAGICK` | `true` | build the image with ImageMagick, for previews of HEIC, JPEG XL, JPEG 2000, EXR, HDR, DDS, XCF, BMP, ICO and more |
 
 The image also sets the server's own variables (`HOST`, `PORT`, `VAULTS_DIR`,

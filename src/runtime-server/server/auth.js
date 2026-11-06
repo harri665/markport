@@ -141,6 +141,26 @@ function createAuth({ password, dataDir }) {
     return safeEqual(token.slice(dot + 1), sign(kind + '|' + subject + '|' + exp));
   }
 
+  // Signed, expiring JSON, for OAuth (mcp/oauth.js): client ids, codes and
+  // tokens. Tied to the password like every other token here, so changing
+  // it signs every connected app out.
+  function seal(kind, data, ttlMs) {
+    const body = Buffer.from(JSON.stringify({ k: kind, e: Date.now() + ttlMs, d: data })).toString('base64url');
+    return body + '.' + sign('seal|' + pwFingerprint + '|' + body);
+  }
+
+  function unseal(kind, token) {
+    if (typeof token !== 'string') return null;
+    const dot = token.lastIndexOf('.');
+    if (dot < 1) return null;
+    const body = token.slice(0, dot);
+    if (!safeEqual(token.slice(dot + 1), sign('seal|' + pwFingerprint + '|' + body))) return null;
+    let v;
+    try { v = JSON.parse(Buffer.from(body, 'base64url').toString('utf8')); } catch (_) { return null; }
+    if (!v || v.k !== kind || !(v.e > Date.now())) return null;
+    return v.d;
+  }
+
   function cookies(req) {
     if (!req._mpCookies) req._mpCookies = parseCookies(req.headers && req.headers.cookie);
     return req._mpCookies;
@@ -225,6 +245,9 @@ function createAuth({ password, dataDir }) {
     setOwnerSession,
     clearOwnerSession,
     issueApiToken,
+    seal,
+    unseal,
+    requestToken,
     hasGrant,
     setGrant,
     grantedShareIds,

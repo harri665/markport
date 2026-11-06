@@ -187,6 +187,7 @@ Server environment variables:
 - `VAULTS_DIR`: optional. Every top-level folder in it is registered as a vault at startup, so it appears on the start screen. Used by the Docker image (`/data/vaults`).
 - `DEFAULT_VAULT_NAME`: vault folder created in `VAULTS_DIR` when it has none, default `Notes`.
 - `MARKPORT_PASSWORD`: optional owner password. When set, the app asks for it at `/login` and every vault and API needs it; share links (below) are the only way in without it. When unset there is no login, so keep the server behind an authenticating proxy.
+- `MARKPORT_MCP`, `MARKPORT_PUBLIC_URL`, `MARKPORT_OAUTH_REDIRECT_HOSTS`, `MARKPORT_OAUTH_CLIENT_HOSTS`, `MARKPORT_MCP_PLAIN_PUNCTUATION`, `MARKPORT_MCP_INSTRUCTIONS_FILE`: the MCP endpoint for apps like Claude, with OAuth sign-in. See "Connecting Claude" in `src/deployments/server/README.md`.
 
 ### Sharing a note or folder
 
