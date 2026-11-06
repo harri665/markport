@@ -1,0 +1,9 @@
+{
+  "id": "markport-root-folder",
+  "name": "Markport - Root Folder",
+  "version": "0.1.0",
+  "minAppVersion": "1.0.0",
+  "description": "Right-click a folder and show it as the file explorer's root for this session. New notes that would go to the vault root go there instead. Cleared when the tab closes.",
+  "author": "Markport",
+  "isDesktopOnly": false
+}

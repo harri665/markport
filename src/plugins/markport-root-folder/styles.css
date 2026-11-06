@@ -1,0 +1,42 @@
+.markport-root-folder-bar:empty {
+  display: none;
+}
+
+.markport-root-folder-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--size-2-2, 4px);
+  margin: 0 var(--size-4-2, 8px) var(--size-2-2, 4px);
+  padding: var(--size-2-1, 2px) var(--size-2-2, 4px);
+  border-radius: var(--radius-s, 4px);
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+  font-size: var(--font-ui-small, 13px);
+}
+
+.markport-root-folder-label {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--size-2-2, 4px);
+  font-weight: var(--font-semibold, 600);
+}
+
+.markport-root-folder-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.markport-root-folder-icon,
+.markport-root-folder-btn {
+  display: flex;
+  flex: none;
+}
+
+.markport-root-folder-icon svg,
+.markport-root-folder-btn svg {
+  width: var(--icon-s, 16px);
+  height: var(--icon-s, 16px);
+}
