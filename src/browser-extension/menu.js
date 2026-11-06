@@ -23,7 +23,7 @@
   if (self.__markportMenu) return;
 
   const { send } = self.__markportShared;
-  const { folderGrid, folderTree } = self.MarkportLib;
+  const { folderGrid, favoriteFolders, folderTree } = self.MarkportLib;
 
   // Two rows of three folders. Every other folder is a hover away, in the
   // submenus that open beside the "Vault root" bar at the bottom.
@@ -116,6 +116,8 @@
     .tile .hint { font-size: 10.5px; color: var(--sub); }
     .tile.last { background: color-mix(in srgb, var(--accent) 13%, transparent); }
     .tile.new { color: var(--accent); }
+    .tile.fav svg { color: #E8A33D; }
+    .glabel { padding: 6px 12px 0; font-size: 10.5px; color: var(--sub); text-transform: uppercase; letter-spacing: .06em; }
 
     .foot { flex: none; display: flex; flex-direction: column; padding-top: 4px; border-top: .5px solid var(--sep); margin-top: 3px; }
     .foot:empty { display: none; }
@@ -194,6 +196,7 @@
   const ICONS = {
     folder: 'M3.5 7.2c0-.9.7-1.7 1.7-1.7h4.1l1.9 2h7.6c.9 0 1.7.8 1.7 1.7v7.9c0 .9-.8 1.7-1.7 1.7H5.2c-1 0-1.7-.8-1.7-1.7z',
     root: 'M4 11.2 12 4.5l8 6.7M6.3 9.5v9h11.4v-9',
+    star: 'M12 4.3l2.35 4.77 5.27.77-3.81 3.71.9 5.24L12 16.32l-4.71 2.47.9-5.24-3.81-3.71 5.27-.77z',
     recent: 'M12 3.8a8.2 8.2 0 1 0 0 16.4 8.2 8.2 0 1 0 0-16.4zM12 7.6V12l2.9 1.8',
     plus: 'M12 5.5v13M5.5 12h13',
     right: 'M9 5.5 15.5 12 9 18.5',
@@ -425,10 +428,25 @@
       list.append(head);
       if (!isOpen) return;
 
-      // A grid of folders, the one used last at the top left.
+      // The image library's favorite folders first, then a grid of
+      // folders, the one used last at the top left.
+      const favs = favoriteFolders(v.favorites, v.folders);
+      if (favs.length) {
+        list.append(el('div', 'glabel', 'Favorites'));
+        const fg = el('div', 'grid');
+        favs.slice(0, 9).forEach((f) => {
+          const hint = f.includes('/') ? f.slice(0, f.lastIndexOf('/')) : (f === v.target ? 'Default' : '');
+          const t = tile('star', f ? f.split('/').pop() : 'Vault root', hint, 'fav');
+          t.title = (f || '/') + ' in ' + v.label;
+          actionable(t, () => pick(v, f), hover(() => closePanels(0)));
+          fg.append(t);
+        });
+        list.append(fg);
+        list.append(el('div', 'glabel', 'Recent'));
+      }
       const recent = (v.recent || []);
       const grid = el('div', 'grid');
-      folderGrid(v.target, recent, v.folders).slice(0, GRID_MAX).forEach((f, n) => {
+      folderGrid(v.target, recent, v.folders, favs).slice(0, GRID_MAX).forEach((f, n) => {
         const isLast = n === 0 && recent.length > 0 && recent[0] === f;
         const hint = isLast ? 'Last used'
           : f === v.target ? 'Default'

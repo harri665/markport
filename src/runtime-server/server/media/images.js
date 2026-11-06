@@ -7,8 +7,9 @@
  * than `width` from any image the server can read, and return the source's
  * size. Decoders, in order:
  *
- *   1. sharp (libvips): JPEG, PNG, WebP, AVIF, GIF, TIFF, HEIF
- *   2. worker.js (plain JS): PSD/PSB, TGA, QOI, Krita/OpenRaster/Procreate,
+ *   1. sharp (libvips): JPEG, PNG, WebP, AVIF, GIF, TIFF
+ *   2. worker.js (plain JS / WebAssembly): HEIC/HEIF (libheif; tried before
+ *      sharp for those), PSD/PSB, TGA, QOI, Krita/OpenRaster/Procreate,
  *      camera RAW previews, TIFF that libvips refused
  *   3. ImageMagick, when installed (the Docker image has it): HEIC, JPEG XL,
  *      JPEG 2000, EXR, HDR, DDS, XCF, BMP, ICO, PCX, ... and anything the
@@ -28,7 +29,7 @@ sharp.cache(false);                  // the media cache is the cache; keep libvi
 sharp.concurrency(Math.max(1, Math.min(4, require('os').cpus().length - 1)));
 
 const SHARP_INPUT = new Set(['jpg', 'jpeg', 'jfif', 'pjpeg', 'pjp', 'png', 'apng', 'webp', 'avif', 'gif', 'tif', 'tiff', 'heic', 'heif', 'hif']);
-const WORKER_INPUT = new Set(['psd', 'psb', 'tga', 'icb', 'vda', 'vst', 'qoi', 'kra', 'ora', 'procreate', 'tif', 'tiff'].concat(formats.RAW_CAMERA));
+const WORKER_INPUT = new Set(['psd', 'psb', 'tga', 'icb', 'vda', 'vst', 'qoi', 'kra', 'ora', 'procreate', 'tif', 'tiff', 'heic', 'heif', 'hif'].concat(formats.RAW_CAMERA));
 const MAX_PIXELS = 512e6;            // refuse decompression bombs
 
 // ImageMagick 7 ("magick") or 6 ("convert"). Not on Windows: convert.exe there is a disk tool.
@@ -84,47 +85,66 @@ async function sizeOf(img) {
   return { width: swap ? m.height : m.width, height: swap ? m.width : m.height, format: m.format, pages: m.pages || 1 };
 }
 
+// HEIC/HEIF: libheif (worker) first - libvips here reads their headers but
+// has no HEVC decoder. sharp after it covers JPEGs that only carry a .heic
+// name (common after iPhone photos are converted on the way).
+const HEIF = new Set(['heic', 'heif', 'hif']);
+
 /**
- * Decode `file` into a sharp pipeline. Returns { img, source } where source
- * is { width, height, format, decoder }.
+ * Ways to decode `file` into a sharp pipeline, best first. Each resolves to
+ * { img, source } where source is { width, height, format, decoder }.
  */
-async function open(file, ext, pool, width) {
+function openers(file, ext, pool, width) {
   const e = String(ext).toLowerCase();
-  const errors = [];
-  if (SHARP_INPUT.has(e)) {
-    try {
-      const img = sharp(file, { limitInputPixels: MAX_PIXELS, failOn: 'none', animated: false, pages: 1 });
-      const source = await sizeOf(img);
-      return { img, source: Object.assign(source, { decoder: 'sharp' }) };
-    } catch (err) { errors.push(err.message); }
-  }
-  if (WORKER_INPUT.has(e) && pool) {
-    try {
-      const r = await pool.run('decode', { file, ext: e });
-      const img = r.kind === 'raw'
-        ? sharp(Buffer.from(r.data.buffer, r.data.byteOffset, r.data.byteLength), { raw: { width: r.width, height: r.height, channels: 4 }, limitInputPixels: MAX_PIXELS })
-        : sharp(Buffer.from(r.data.buffer, r.data.byteOffset, r.data.byteLength), { limitInputPixels: MAX_PIXELS, failOn: 'none' });
-      const source = r.kind === 'raw' ? { width: r.width, height: r.height, format: e, pages: 1 } : await sizeOf(img);
-      return { img, source: Object.assign(source, { format: e, decoder: 'js' }) };
-    } catch (err) { errors.push(err.message); }
-  }
-  if (magick()) {
+  const out = [];
+  const viaSharp = async () => {
+    const img = sharp(file, { limitInputPixels: MAX_PIXELS, failOn: 'none', animated: false, pages: 1 });
+    const source = await sizeOf(img);
+    return { img, source: Object.assign(source, { decoder: 'sharp' }) };
+  };
+  const viaWorker = async () => {
+    const r = await pool.run('decode', { file, ext: e });
+    const img = r.kind === 'raw'
+      ? sharp(Buffer.from(r.data.buffer, r.data.byteOffset, r.data.byteLength), { raw: { width: r.width, height: r.height, channels: 4 }, limitInputPixels: MAX_PIXELS })
+      : sharp(Buffer.from(r.data.buffer, r.data.byteOffset, r.data.byteLength), { limitInputPixels: MAX_PIXELS, failOn: 'none' });
+    const source = r.kind === 'raw' ? { width: r.width, height: r.height, format: e, pages: 1 } : await sizeOf(img);
+    return { img, source: Object.assign(source, { format: e, decoder: 'js' }) };
+  };
+  const viaMagick = async () => {
     // Ask ImageMagick for a working size a little above the target, then let sharp finish.
     const png = await magickToPng(file, width ? Math.min(8192, width * 2) : 0);
     const img = sharp(png, { limitInputPixels: MAX_PIXELS });
     const source = await sizeOf(img);
     return { img, source: Object.assign(source, { format: e, decoder: 'imagemagick', approximate: true }) };
-  }
-  throw new Error(errors[0] || ('This server cannot read .' + e + ' files' + (magick() ? '' : ' (install ImageMagick for more formats)')));
+  };
+  const worker = WORKER_INPUT.has(e) && pool;
+  if (HEIF.has(e) && worker) out.push(viaWorker);
+  if (SHARP_INPUT.has(e)) out.push(viaSharp);
+  if (worker && !HEIF.has(e)) out.push(viaWorker);
+  if (magick()) out.push(viaMagick);
+  return out;
 }
 
+// Make the WebP with the first decoder that gets all the way through: a
+// decoder can read a file's header and still fail on its pixels (libvips
+// with HEVC), so the encode is part of each attempt.
 async function render(file, ext, width, out, pool) {
-  const { img, source } = await open(file, ext, pool, width);
-  const tmp = out + '.' + process.pid + '.' + Date.now() + '.tmp';
+  const e = String(ext).toLowerCase();
+  const errors = [];
   await fsp.mkdir(path.dirname(out), { recursive: true });
-  await toWebp(img, width).toFile(tmp);
-  await fsp.rename(tmp, out);
-  return source;
+  for (const attempt of openers(file, e, pool, width)) {
+    const tmp = out + '.' + process.pid + '.' + Date.now() + '.tmp';
+    try {
+      const { img, source } = await attempt();
+      await toWebp(img, width).toFile(tmp);
+      await fsp.rename(tmp, out);
+      return source;
+    } catch (err) {
+      errors.push(err.message);
+      await fsp.rm(tmp, { force: true }).catch(() => {});
+    }
+  }
+  throw new Error(errors[0] || ('This server cannot read .' + e + ' files' + (magick() ? '' : ' (install ImageMagick for more formats)')));
 }
 
 // The source's size without making a thumbnail, when that is cheap.

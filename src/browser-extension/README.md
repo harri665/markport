@@ -76,7 +76,8 @@ into Options once on each computer.
   - **Esc**, or the **×** at the top right, cancels. Clicking outside the menu dismisses it so
     you can draw again. Capture mode ends after one save.
 - **Drag an image** on any page and the folder menu opens beside the pointer. Drop the image on
-  a folder to save it there. The menu is a small grid of at most six folders: the folder you last
+  a folder to save it there. Folders you starred in the image library come first, under
+  **Favorites**. Then a small grid of at most six folders: the folder you last
   saved an image to is at the top left, then your other recent folders and the default folder.
   Below it, the **Vault root** bar reaches every other folder: rest the image on it and a menu of
   the vault's folders opens beside the popup; rest on a folder there and the next menu shows its
@@ -95,7 +96,10 @@ into Options once on each computer.
   image in the vault, next to a **board** for composing them. Left to right:
   - The **sidebar** has All images, Untagged, the folders that hold images, smart folders
     (Added this week, plus any search you save with the bookmark button by the search box) and
-    your tags. It collapses into a rail of colored initial chips.
+    your tags. It collapses into a rail of colored initial chips. Star a folder, tag or smart
+    folder (hover it, or right-click) to pin it under **Favorites**; starred folders also come
+    first in this extension's folder menu. Folds and favorites are part of the library's shared
+    settings, so every device with the vault shows the same tree; the panel layout stays per device.
   - The **grid** is masonry, with search (`#tag` or `tag:x` filters by tag, `color:teal` or
     `color:#3e6f72` by color) and sorting and thumbnail size under the sort button. Click,
     Ctrl/Cmd-click or Shift-click to select. **F** (or Space) opens a full-screen viewer that
@@ -113,9 +117,10 @@ into Options once on each computer.
     Picture-in-Picture, Chrome/Edge), with a library strip to drag images from. Desktop Obsidian
     opens a popout window instead, and other browsers a floating panel.
 
-  - **Formats.** Anything a browser shows, plus PSD/PSB, TIFF, TGA, QOI, Krita, OpenRaster,
+  - **Formats.** Anything a browser shows, plus HEIC/HEIF (iPhone photos, upright as shot, and
+    the many `.heic` files that are really JPEGs), PSD/PSB, TIFF, TGA, QOI, Krita, OpenRaster,
     Procreate (thumbnail) and camera RAW (its built-in preview), decoded in memory for display.
-    On a Markport server, the server also reads HEIC, JPEG XL, JPEG 2000, EXR, HDR, DDS, XCF
+    On a Markport server, the server also reads JPEG XL, JPEG 2000, EXR, HDR, DDS, XCF
     and more (with ImageMagick, which the Docker image includes).
   - **3D models** (GLB/glTF, OBJ+MTL, FBX, STL, PLY, 3MF, DAE, USDZ) open in a live 3D viewer
     in Details and full screen: drag to orbit, wheel to zoom. On a Markport server each model

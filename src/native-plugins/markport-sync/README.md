@@ -95,6 +95,12 @@ unless **Sync settings and plugins** is on.
 Hidden files and folders (`.obsidian`, `.trash`, dotfiles) are not synced as notes, so each side
 keeps its own settings, plugins and themes, unless you turn on **Sync settings and plugins**.
 
+One file in `.obsidian` always syncs with the link that covers the whole vault: the image library's
+`plugins/markport-clipper/data.json` (tags, notes, folder folds, favorites, smart folders), so the
+library looks the same on every device. A device syncing it for the first time takes the server's
+copy. Unlike other settings it syncs live (within a couple of seconds), and the clipper uses
+what arrives without a reload.
+
 ## Settings and plugins
 
 **Sync settings and plugins** (in the plugin's settings) also keeps this vault's `.obsidian` in

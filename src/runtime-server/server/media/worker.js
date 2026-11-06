@@ -3,7 +3,7 @@
 /**
  * Media worker (worker_threads; see pool.js). Two jobs:
  *
- *   decode  formats sharp cannot read, in plain JavaScript: PSD/PSB
+ *   decode  formats sharp cannot read, in JavaScript: HEIC/HEIF (libheif), PSD/PSB
  *           composite (ag-psd), TGA, QOI, TIFF fallback (utif2), the
  *           flattened image in Krita/OpenRaster/Procreate files, the JPEG
  *           preview in camera RAW files. Returns raw RGBA pixels or encoded
@@ -39,6 +39,7 @@ function unzipOne(bytes, name) {
 }
 
 let psdReady = false;
+let heif = null;   // libheif (WebAssembly), loaded on the first HEIC
 
 function decode({ file, ext }) {
   const buf = new Uint8Array(fs.readFileSync(file));
@@ -53,6 +54,10 @@ function decode({ file, ext }) {
     const psd = readPsd(buf, { skipLayerImageData: true, skipThumbnail: true, useImageData: true });
     if (!psd.imageData) throw new Error('This PSD has no flattened image (save it with "Maximize compatibility")');
     return raw(psd.imageData);
+  }
+  if (e === 'heic' || e === 'heif' || e === 'hif') {
+    if (!heif) heif = require('libheif-js/wasm-bundle');
+    return formats.decodeHEIF(heif, buf).then(raw);
   }
   if (e === 'tga' || e === 'icb' || e === 'vda' || e === 'vst') return raw(formats.decodeTGA(buf));
   if (e === 'qoi') return raw(formats.decodeQOI(buf));
@@ -127,7 +132,7 @@ parentPort.on('message', async ({ id, type, args }) => {
   try {
     let result;
     if (type === 'decode') {
-      result = decode(args);
+      result = await decode(args);
       parentPort.postMessage({ id, result }, [result.data.buffer]);
       return;
     }

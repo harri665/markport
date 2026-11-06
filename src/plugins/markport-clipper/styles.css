@@ -922,3 +922,136 @@
 /* Board nodes for models and flipbooks */
 .mpl-bn.is-model .mpl-bn-img, .mpl-bn.is-flipbook .mpl-bn-img { background-color: var(--mpl-panel); }
 .mpl-bn .mpl-kind { left: 8px; bottom: 8px; }
+
+/* Loading: a model's preview while it renders, the 3D viewer while it loads. */
+.mpl-spin {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: var(--mpl-muted);
+  font-family: var(--mpl-mono-font);
+  font-size: 10px;
+  letter-spacing: .04em;
+  pointer-events: none;
+}
+.mpl-spin-wheel {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 2px solid color-mix(in srgb, var(--mpl-muted) 30%, transparent);
+  border-top-color: var(--mpl-accent);
+  animation: mpl-spin .8s linear infinite;
+}
+@keyframes mpl-spin { to { transform: rotate(360deg); } }
+.is-rendering > img { visibility: hidden; }
+.mpl-thumb.is-model.is-poster > img, .mpl-bn-img.is-model.is-poster > img { visibility: visible; object-fit: contain; }
+.mpl-bn-img .mpl-spin-label, .mpl-mini-thumb .mpl-spin-label { display: none; }
+
+.mpl-3d-status { flex-direction: column; }
+.mpl-3d-poster { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; opacity: .45; filter: blur(1px); }
+.mpl-3d-loading {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 18px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--mpl-board) 75%, transparent);
+  max-width: 90%;
+}
+.mpl-3d-name { color: var(--mpl-text); font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+.mpl-3d-stage { color: var(--mpl-muted); }
+.mpl-3d-status.is-error { flex-direction: row; }
+
+/* Clay previews sit on Blender's viewport gray. */
+.mpl-thumb.is-model, .mpl-bn-img.is-model, .mpl-mini-thumb.is-model, .mpl-dpreview.mpl-kind-model .mpl-3d {
+  background-color: #393939;
+  background-image: radial-gradient(ellipse at 50% 35%, #4a4a4a 0%, #393939 55%, #2e2e2e 100%);
+}
+.mpl-thumb.is-model.is-sheet, .mpl-bn-img.is-model.is-sheet, .mpl-mini-thumb.is-model.is-sheet { background-color: #393939; }
+.is-model .mpl-spin, .is-model .mpl-none { color: #a8a8a8; }
+
+/* A 3D model or image opened from the file explorer. */
+.workspace-leaf-content[data-type="markport-media-file"] > .view-content.mpl-file-view { padding: 0; overflow: hidden; }
+.mpl.mpl-file { height: 100%; }
+.mpl-file-bar { flex: none; display: flex; align-items: center; gap: 4px; height: 40px; padding: 0 8px 0 14px; border-bottom: 1px solid var(--mpl-line); background: var(--mpl-bar); }
+.mpl-file-stage { position: relative; flex: 1; min-height: 0; }
+.mpl-file-stage .mpl-3d { border-radius: 0; }
+.mpl-file-image { display: flex; align-items: center; justify-content: center; padding: 16px; background: var(--mpl-checker), var(--background-primary-alt); }
+.mpl-file-image img { max-width: 100%; max-height: 100%; object-fit: contain; }
+.mpl-file-stage .mpl-3d { background-color: #393939; background-image: radial-gradient(ellipse at 50% 35%, #4a4a4a 0%, #393939 55%, #2e2e2e 100%); }
+
+/* Turntable / flipbook timeline: shows on hover; click to freeze an angle. */
+.mpl-tl {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: 8px;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 22px;
+  padding: 0 4px 0 8px;
+  border-radius: 6px;
+  background: rgba(20, 21, 24, .78);
+  opacity: 0;
+  transform: translateY(4px);
+  transition: opacity .12s ease, transform .12s ease;
+  pointer-events: none;
+}
+.is-scrub:hover > .mpl-tl, .is-scrub.is-hovering > .mpl-tl,
+.mpl-card.is-selected .is-scrub > .mpl-tl, .mpl-bn.is-selected .is-scrub > .mpl-tl { opacity: 1; transform: none; pointer-events: auto; }
+.mpl-tl-track { position: relative; flex: 1; height: 100%; cursor: pointer; }
+.mpl-tl-track::before {
+  content: '';
+  position: absolute;
+  left: 0; right: 0; top: 50%;
+  height: 3px;
+  margin-top: -1.5px;
+  border-radius: 2px;
+  background: rgba(232, 230, 225, .22);
+}
+.mpl-tl-fill {
+  position: absolute;
+  left: 0; top: 50%;
+  height: 3px;
+  margin-top: -1.5px;
+  border-radius: 2px;
+  background: rgba(232, 230, 225, .7);
+  pointer-events: none;
+}
+.mpl-tl-mark {
+  position: absolute;
+  top: 50%;
+  width: 9px;
+  height: 9px;
+  margin: -4.5px 0 0 -4.5px;
+  border-radius: 50%;
+  background: var(--mpl-accent);
+  box-shadow: 0 0 0 2px rgba(20, 21, 24, .9);
+  display: none;
+  pointer-events: none;
+}
+.is-frozen .mpl-tl-mark { display: block; }
+.mpl button.mpl-tl-reset { width: 18px; height: 18px; color: #E8E6E1; display: none; }
+.mpl button.mpl-tl-reset svg { width: 12px; height: 12px; }
+.mpl button.mpl-tl-reset:hover { background: rgba(255, 255, 255, .12); color: #fff; }
+.mpl .is-frozen button.mpl-tl-reset { display: inline-flex; }
+/* Room for the bar: the name sits above it, the kind badge steps aside. */
+.mpl-card.has-timeline:hover .mpl-card-name, .mpl-card.has-timeline.is-selected .mpl-card-name { padding-bottom: 34px; }
+.mpl-bn .is-scrub:hover .mpl-kind, .mpl-bn .is-scrub.is-hovering .mpl-kind { opacity: 0; }
+
+/* Favorites: a star on each folder, tag and smart folder row. */
+.mpl button.mpl-star { width: 20px; height: 20px; margin-left: -2px; color: var(--mpl-muted); opacity: 0; }
+.mpl button.mpl-star svg { width: 13px; height: 13px; }
+.mpl-row:hover button.mpl-star, .mpl-row:focus-within button.mpl-star { opacity: .7; }
+.mpl button.mpl-star:hover { opacity: 1; color: var(--mpl-text); background: none; }
+.mpl button.mpl-star.is-on { opacity: 1; color: var(--mpl-accent); }
+.mpl button.mpl-star.is-on svg { fill: currentColor; }
+@media (hover: none) { .mpl button.mpl-star { opacity: .5; } }

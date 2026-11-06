@@ -43,6 +43,44 @@ const MAX_BODY = Math.ceil(MAX_BYTES / 3) * 4 + 64 * 1024;
 const BASE_PORT = 27150;
 const PORT_COUNT = 10;
 
+// The library's settings live in data.json, which every sync carries between
+// devices (Markport Sync, NextCloud, Obsidian Sync; Markport's web version
+// reads the server's copy). These belong to one device instead, and are kept
+// in its local storage: the window layout, and the desktop pairing key the
+// browser extension on that computer uses.
+const DEVICE_UI = ['sideMin', 'gridMin', 'boardMin', 'restore', 'gridW', 'views', 'boards', 'board', 'thumb'];
+const DEVICE_SETTINGS = ['pairingKey'];
+const DEVICE_STORE = 'markport-clipper-device';
+
+// The part of the settings written to data.json (pure: tests).
+function sharedSettings(settings) {
+  const out = Object.assign({}, settings);
+  for (const k of DEVICE_SETTINGS) delete out[k];
+  out.libraryUi = Object.assign({}, settings.libraryUi);
+  for (const k of DEVICE_UI) delete out.libraryUi[k];
+  return out;
+}
+
+// What only this device keeps (pure: tests).
+function deviceSettings(settings) {
+  const ui = {};
+  for (const k of DEVICE_UI) if (settings.libraryUi && settings.libraryUi[k] !== undefined) ui[k] = settings.libraryUi[k];
+  const out = { ui };
+  for (const k of DEVICE_SETTINGS) if (settings[k] !== undefined) out[k] = settings[k];
+  return out;
+}
+
+// data.json (possibly from another device) plus this device's own part.
+// Older data.json files still carry the device keys: they are used only
+// until this device has its own.
+function mergeSettings(defaults, data, device) {
+  const out = Object.assign({}, defaults, data);
+  const d = device || {};
+  for (const k of DEVICE_SETTINGS) if (d[k] !== undefined) out[k] = d[k];
+  out.libraryUi = Object.assign({}, data && data.libraryUi, d.ui);
+  return out;
+}
+
 const DEFAULT_SETTINGS = {
   targetFolder: '',       // '' = vault root
   createNote: false,      // also write "<image>.md" with the source link
@@ -266,6 +304,24 @@ function renameLibraryKeys(library, oldPath, newPath) {
     }
   }
   return changed;
+}
+
+// Folder folds and favorites are paths too: follow renames, forget deletes.
+const under = (p, root) => p === root || p.startsWith(root + '/');
+function renameUiPaths(ui, oldPath, newPath) {
+  let changed = false;
+  const move = (p) => { if (!under(p, oldPath)) return p; changed = true; return newPath + p.slice(oldPath.length); };
+  ui.collapsed = (ui.collapsed || []).map(move);
+  for (const f of ui.favorites || []) if (f.kind === 'folder') f.value = move(f.value);
+  return changed;
+}
+
+function dropUiPaths(ui, p) {
+  const c0 = (ui.collapsed || []).length;
+  const f0 = (ui.favorites || []).length;
+  ui.collapsed = (ui.collapsed || []).filter((x) => !under(x, p));
+  ui.favorites = (ui.favorites || []).filter((f) => !(f.kind === 'folder' && under(f.value, p)));
+  return ui.collapsed.length !== c0 || ui.favorites.length !== f0;
 }
 
 function dropLibraryKeys(library, p) {
@@ -680,6 +736,8 @@ const ICONS = {
   pause: ['M5.5 3.5v9', 'M10.5 3.5v9'],
   rotate: ['M13 8a5 5 0 1 1-1.5-3.6', 'M13 2.5v3h-3'],
   reset: ['M3 8a5 5 0 1 0 1.5-3.6', 'M3 2.5v3h3'],
+  clay: [{ t: 'circle', cx: 8, cy: 8, r: 5.5 }, 'M4.6 6.2a4 4 0 0 1 3-2.6'],
+  star: ['M8 2.3l1.75 3.55 3.9.57-2.83 2.76.67 3.89L8 11.23l-3.49 1.84.67-3.89-2.83-2.76 3.9-.57z'],
   logo: [{ t: 'circle', cx: 6.8, cy: 6.8, r: 4.4 }, 'M10 10l3.6 3.6'],
 };
 
@@ -1110,7 +1168,7 @@ class BoardCanvas {
       // Images, flipbooks (hover to scrub) and models (their turntable).
       e.classList.toggle('is-model', item.kind === 'model');
       e.classList.toggle('is-flipbook', item.kind === 'flipbook');
-      const pic = mountMediaPicture(this.plugin, body, item, { width: 1024 });
+      const pic = mountMediaPicture(this.plugin, body, item, { width: 1024, timeline: !this.opts.mini });
       h('div', 'mpl-none', body, item.kind === 'model' ? '3D model' : item.extension.toUpperCase());
       if (item.kind !== 'image') h('span', 'mpl-kind', body, kindLabel(item));
       pic.img.addEventListener('load', () => {
@@ -1864,6 +1922,64 @@ class MiniBoard {
 }
 
 const PIN_VIEW = 'markport-image-board-pin';
+const MEDIA_FILE_VIEW = 'markport-media-file';
+
+// A tab for one 3D model or one image Obsidian cannot show itself (PSD, TIFF,
+// RAW, ...). Registering these extensions is also what makes Obsidian list
+// such files in the file explorer.
+class MediaFileView extends (obsidian.FileView || obsidian.ItemView) {
+  constructor(leaf, plugin) {
+    super(leaf);
+    this.plugin = plugin;
+    this.widget = null;
+  }
+  getViewType() { return MEDIA_FILE_VIEW; }
+  getDisplayText() { return this.file ? this.file.name : 'Media'; }
+  getIcon() { return this.file && this.plugin.media.F.kindOf(this.file.extension) === 'model' ? 'box' : 'image'; }
+  canAcceptExtension(ext) { return this.plugin.mediaExtensions.has(String(ext).toLowerCase()); }
+
+  async onLoadFile(file) {
+    this.unmount();
+    const media = this.plugin.media;
+    const kind = media.F.kindOf(file.extension);
+    const item = media.item(file.path) || new MediaItem(kind || 'image', file);
+    const root = this.contentEl;
+    root.empty();
+    root.addClass('mpl-file-view');
+    const wrap = root.createDiv({ cls: 'mpl mpl-file' });
+    wrap.dataset.accent = this.plugin.settings.libraryUi.accent || 'amber';
+    solidColors(wrap);
+    if (item.kind === 'model') {
+      const bar = wrap.createDiv({ cls: 'mpl-file-bar' });
+      bar.createSpan({ cls: 'mpl-mono mpl-muted', text: kindLabel(item) + ' · ' + formatBytes(file.stat.size) });
+      bar.createSpan({ cls: 'mpl-spacer' });
+      const stage = wrap.createDiv({ cls: 'mpl-file-stage' });
+      this.widget = new ModelViewer(stage, this.plugin, item, { large: true });
+      modelTools(bar, this.widget);
+    } else {
+      const stage = wrap.createDiv({ cls: 'mpl-file-stage mpl-file-image' });
+      const img = stage.createEl('img', { attr: { alt: file.basename } });
+      const orig = media.originalSrc(item);
+      if (orig) img.src = orig;
+      else {
+        stage.addClass('is-loading');
+        media.src(item, PREVIEW_W).then((u) => {
+          stage.removeClass('is-loading');
+          if (u) img.src = u;
+          else stage.createDiv({ cls: 'mpl-full-none', text: 'This ' + file.extension.toUpperCase() + ' file cannot be shown here' + (media.server ? '.' : ' (a Markport server can show more formats).') });
+        });
+      }
+    }
+  }
+
+  unmount() {
+    if (this.widget) this.widget.destroy();
+    this.widget = null;
+  }
+
+  async onUnloadFile() { this.unmount(); this.contentEl.empty(); }
+  async onClose() { this.unmount(); }
+}
 
 class PinnedBoardView extends obsidian.ItemView {
   constructor(leaf, plugin) {
@@ -1920,19 +2036,21 @@ class PinnedBoardView extends obsidian.ItemView {
 //
 // Rules: the vault holds originals only, never anything derived. Locally
 // (desktop Obsidian, in-browser vaults) nothing is converted or optimized;
-// decoded pixels live in memory, plus small thumbnails of decoded formats in
-// the app's own storage (IndexedDB). With a Markport server, the server makes
-// cached thumbnails and web-optimized models outside the vault, and a browser
-// renders each model's turntable once for the server to cache.
+// decoded pixels live in memory, plus small thumbnails of decoded formats and
+// models' turntable previews in the app's own storage (IndexedDB). With a
+// Markport server, the server makes cached thumbnails and web-optimized
+// models outside the vault, and a browser renders each model's turntable
+// once for the server to cache.
 
 const THUMB_W = 480;
 const PREVIEW_W = 2048;
 // version: bump when turntables should be rendered again (it is part of their cache key).
-const TURNTABLE = { frames: 36, cols: 6, size: 256, version: 2 };
+const TURNTABLE = { frames: 36, cols: 6, size: 256, version: 3 };
 const VENDOR = {
   three: 'vendor-three.js',
   decoders: 'vendor-decoders.js',
   draco: 'vendor-draco-decoder.js',
+  heif: 'vendor-heif.js',
   formats: 'media-formats.js',
 };
 
@@ -1993,14 +2111,24 @@ function looksLikeSequence(names) {
 // the sense that matters: it is serialized with toString() into the worker,
 // so it may only use its arguments and what both a worker and a window
 // have (createImageBitmap, OffscreenCanvas or <canvas>, Blob).
-//   F: media-formats.js, D: vendor-decoders.js
+//   F: media-formats.js, D: vendor-decoders.js,
+//   H: async () => libheif (only called for a HEIC the browser can't read itself)
 // Returns { thumb: Blob, preview: Blob, width, height }.
-async function decodeForDisplay(F, D, bytes, ext, sizes) {
+async function decodeForDisplay(F, D, bytes, ext, sizes, H) {
   const b = new Uint8Array(bytes);
   const e = String(ext).toLowerCase();
   let rgba = null;
   let blob = null;
-  if (e === 'psd' || e === 'psb') {
+  let direct = null;
+  if (e === 'heic' || e === 'heif' || e === 'hif') {
+    // The browser first: Safari reads HEIC, and every browser reads the many
+    // ".heic" files that are really JPEGs (photos converted on the way).
+    try { direct = await createImageBitmap(new Blob([b])); } catch (_) { direct = null; }
+    if (!direct) {
+      if (!F.isHeifBytes(b)) throw new Error('Not a HEIC/HEIF image');
+      rgba = await F.decodeHEIF(await H(), b);
+    }
+  } else if (e === 'psd' || e === 'psb') {
     // ag-psd makes its image data through a canvas factory; a worker has no document.
     if (!globalThis.__mplPsdCanvas && D.initializeCanvas) {
       D.initializeCanvas(
@@ -2034,8 +2162,8 @@ async function decodeForDisplay(F, D, bytes, ext, sizes) {
   } else {
     blob = new Blob([b]);
   }
-  let bmp;
-  if (rgba) {
+  let bmp = direct;
+  if (bmp) { /* decoded by the browser */ } else if (rgba) {
     const data = rgba.data instanceof Uint8ClampedArray ? rgba.data : new Uint8ClampedArray(rgba.data.buffer, rgba.data.byteOffset, rgba.data.byteLength);
     bmp = await createImageBitmap(new ImageData(data, rgba.width, rgba.height));
   } else {
@@ -2108,6 +2236,8 @@ class MediaLibrary {
     this.decodeQueue = Promise.resolve();
     this.thumbs = new ThumbStore('markport-clipper-media');
     this.turntables = new Map(); // path@version -> Promise<url|null>
+    this.posters = new Map();    // path@version -> url of the first turntable frame
+    this.posterWaiters = new Map(); // path@version -> Set(fn)
     this.ttQueue = [];
     this.ttBusy = false;
   }
@@ -2145,7 +2275,9 @@ class MediaLibrary {
         const code = await this.app.vault.adapter.read(this.pluginFile(name));
         const module = { exports: {} };
         // eslint-disable-next-line no-new-func
-        new Function('module', 'exports', code + '\n//# sourceURL=markport-clipper/' + name)(module, module.exports);
+        // __dirname/__filename: in desktop Obsidian (Electron, Node globals present)
+        // Emscripten builds such as libheif take their Node path and ask for them.
+        new Function('module', 'exports', '__dirname', '__filename', code + '\n//# sourceURL=markport-clipper/' + name)(module, module.exports, '/', '/' + name);
         return module.exports;
       })());
       this.vendor.get(name).catch(() => this.vendor.delete(name));
@@ -2321,7 +2453,16 @@ class MediaLibrary {
       });
     }
     const [F, D] = [this.F, await this.loadVendor(VENDOR.decoders)];
-    return decodeForDisplay(F, D, bytes, item.extension, sizes);
+    return decodeForDisplay(F, D, bytes, item.extension, sizes, () => this.heif());
+  }
+
+  // libheif, on the main thread (when there is no worker).
+  heif() {
+    if (!this._heif) {
+      this._heif = this.loadVendor(VENDOR.heif).then((f) => (typeof f === 'function' ? f() : f));
+      this._heif.catch(() => { this._heif = null; });
+    }
+    return this._heif;
   }
 
   // One worker for all decoding: big PSDs never freeze the window.
@@ -2333,13 +2474,28 @@ class MediaLibrary {
         const [formats, decoders] = await Promise.all([read(VENDOR.formats), read(VENDOR.decoders)]);
         const wrap = (code) => '(function(){var module={exports:{}};(function(module,exports){' + code + '\n})(module,module.exports);return module.exports;})()';
         const src = 'var F=' + wrap(formats) + ';var D=' + wrap(decoders) + ';var decode=' + decodeForDisplay.toString() + ';'
-          + 'self.onmessage=async function(e){var m=e.data;try{var r=await decode(F,D,m.bytes,m.ext,m.sizes);self.postMessage({id:m.id,result:r});}'
+          // libheif arrives as source text the first time a HEIC needs it.
+          + 'var heif=null,heifWait=null;function H(){if(heif)return Promise.resolve(heif);'
+          + 'if(!heifWait)heifWait=new Promise(function(res){self.__heifReady=res;self.postMessage({need:"heif"});});return heifWait;}'
+          + 'self.onmessage=async function(e){var m=e.data;'
+          + 'if(m.lib==="heif"){var f=(function(code){var module={exports:{}};(new Function("module","exports",code))(module,module.exports);return module.exports;})(m.code);'
+          + 'heif=typeof f==="function"?f():f;self.__heifReady(heif);return;}'
+          + 'try{var r=await decode(F,D,m.bytes,m.ext,m.sizes,H);self.postMessage({id:m.id,result:r});}'
           + 'catch(err){self.postMessage({id:m.id,error:String((err&&err.message)||err)});}};';
         const url = URL.createObjectURL(new Blob([src], { type: 'text/javascript' }));
         const w = new Worker(url);
         this.workerSeq = 0;
         this.workerJobs = new Map();
         w.onmessage = (e) => {
+          if (e.data && e.data.need === 'heif') {
+            this.app.vault.adapter.read(this.pluginFile(VENDOR.heif))
+              .then((code) => w.postMessage({ lib: 'heif', code }))
+              .catch((err) => {
+                for (const job of this.workerJobs.values()) job.reject(new Error('HEIC decoder missing: ' + ((err && err.message) || err)));
+                this.workerJobs.clear();
+              });
+            return;
+          }
           const job = this.workerJobs.get(e.data.id);
           if (!job) return;
           this.workerJobs.delete(e.data.id);
@@ -2377,31 +2533,67 @@ class MediaLibrary {
 
   // ── turntables ──
 
-  // The model's turntable: a paired flipbook, or (Markport server) the
-  // sprite sheet a browser rendered. Resolves to
+  // The model's turntable: a paired flipbook, or a sprite sheet rendered in a
+  // browser (cached on the Markport server, or locally in IndexedDB). Resolves to
   //   { flipbook: MediaItem } | { sheet: url, frames, cols } | null
-  async turntable(item) {
+  async turntable(item, opts) {
     if (item.kind !== 'model') return null;
     const paired = this.pairedFlipbook(item);
     if (paired) return { flipbook: paired };
-    if (!this.server || !this.server.caps.turntables) return null;
     const key = item.path + '@' + this.version(item);
+    // The first frame, as soon as it is rendered (long before the other 35).
+    const onPoster = opts && opts.onPoster;
+    if (onPoster) {
+      if (this.posters.has(key)) onPoster(this.posters.get(key));
+      else {
+        if (!this.posterWaiters.has(key)) this.posterWaiters.set(key, new Set());
+        this.posterWaiters.get(key).add(onPoster);
+      }
+    }
     if (!this.turntables.has(key)) {
       this.turntables.set(key, (async () => {
-        const url = this.apiUrl('turntable', item, { r: TURNTABLE.version });
-        const r = await fetch(url, { method: 'HEAD', credentials: 'same-origin' }).catch(() => null);
-        if (r && r.ok) return url;
-        // Not made yet: render it in this browser (queued, one at a time).
-        return this.queueTurntable(item);
+        if (this.server && this.server.caps.turntables) {
+          // Markport server: rendered once by some browser, cached on the server for everyone.
+          const url = this.apiUrl('turntable', item, { r: TURNTABLE.version });
+          const r = await fetch(url, { method: 'HEAD', credentials: 'same-origin' }).catch(() => null);
+          if (r && r.ok) return url;
+          const blob = await this.queueTurntable(item, key);
+          if (!blob || blob.type !== 'image/webp') return null;
+          const put = await fetch(url, { method: 'PUT', body: blob, credentials: 'same-origin' }).catch(() => null);
+          return put && put.ok ? url : URL.createObjectURL(blob);
+        }
+        // Locally (desktop Obsidian, in-browser vaults): rendered here, kept in
+        // the app's own storage (IndexedDB), never in the vault.
+        const idb = 'turntable|' + this.app.vault.getName() + '|' + item.path + '|' + this.version(item) + '|r' + TURNTABLE.version;
+        const stored = await this.thumbs.get(idb);
+        if (stored && stored.blob) return URL.createObjectURL(stored.blob);
+        const blob = await this.queueTurntable(item, key);
+        if (!blob) return null;
+        this.thumbs.put(idb, { blob, t: Date.now() });
+        return URL.createObjectURL(blob);
       })());
     }
     const sheet = await this.turntables.get(key);
+    if (onPoster && this.posterWaiters.has(key)) this.posterWaiters.get(key).delete(onPoster);
     return sheet ? { sheet, frames: TURNTABLE.frames, cols: TURNTABLE.cols } : null;
   }
 
-  queueTurntable(item) {
+  // A preview to show right now, if one exists: the finished sheet or the first frame.
+  previewNow(item) {
+    const key = item.path + '@' + this.version(item);
+    return this.posters.get(key) || null;
+  }
+
+  publishPoster(key, url) {
+    this.posters.set(key, url);
+    const waiting = this.posterWaiters.get(key);
+    this.posterWaiters.delete(key);
+    if (waiting) for (const fn of waiting) { try { fn(url); } catch (e) { console.error('[markport-clipper]', e); } }
+  }
+
+  queueTurntable(item, key) {
     return new Promise((resolve) => {
-      this.ttQueue.push({ item, resolve });
+      this.ttQueue.push({ item, key, resolve });
       this.pumpTurntables();
     });
   }
@@ -2411,8 +2603,8 @@ class MediaLibrary {
     this.ttBusy = true;
     try {
       while (this.ttQueue.length) {
-        const { item, resolve } = this.ttQueue.shift();
-        try { resolve(await this.renderTurntable(item)); } catch (e) {
+        const { item, key, resolve } = this.ttQueue.shift();
+        try { resolve(await this.renderTurntable(item, key)); } catch (e) {
           console.warn('[markport-clipper] turntable for ' + item.path + ' failed:', (e && e.message) || e);
           resolve(null);
         }
@@ -2423,19 +2615,21 @@ class MediaLibrary {
     }
   }
 
-  // Render TURNTABLE.frames views around the model into one WebP sheet, store
-  // it on the server; and while the model is loaded, give the server a GLB of
-  // it when the server cannot convert the original format itself.
-  async renderTurntable(item) {
-    if (!this.server || item.stat.size > 300 * 1024 * 1024) return null;
+  // Render TURNTABLE.frames views around the model into one sprite sheet
+  // (WebP where the browser can encode it). On a Markport server, while the
+  // model is loaded, also give the server a GLB of it when it cannot convert
+  // the original format itself. Returns the sheet as a Blob, or null.
+  async renderTurntable(item, key) {
+    if (item.stat.size > 300 * 1024 * 1024) return null;
     const V = await this.three();
     const { object, optimized } = await this.loadModel(item, { preferOptimized: true });
-    if (!optimized) this.sendModelSource(item, object, V).catch(() => {});
+    if (this.server && !optimized) this.sendModelSource(item, object, V).catch(() => {});
     const { frames, cols, size } = TURNTABLE;
     const rows = Math.ceil(frames / cols);
     const stage = new ModelStage(V, null, { width: size, height: size, offscreen: true });
     try {
       stage.setObject(object);
+      stage.setClay(true);
       const sheet = document.createElement('canvas');
       sheet.width = cols * size;
       sheet.height = rows * size;
@@ -2444,12 +2638,15 @@ class MediaLibrary {
         stage.orbit((i / frames) * Math.PI * 2, 0.32);
         stage.render();
         g.drawImage(stage.renderer.domElement, (i % cols) * size, Math.floor(i / cols) * size, size, size);
+        if (i === 0 && key && !this.posters.has(key)) {
+          // Show the first view everywhere now; the full turntable follows.
+          const poster = await new Promise((resolve) => stage.renderer.domElement.toBlob(resolve, 'image/webp', 0.85));
+          if (poster) this.publishPoster(key, URL.createObjectURL(poster));
+        }
+        // Let the window breathe between frames.
+        if (i % 6 === 5) await new Promise((resolve) => setTimeout(resolve, 0));
       }
-      const blob = await new Promise((resolve) => sheet.toBlob(resolve, 'image/webp', 0.82));
-      if (!blob || blob.type !== 'image/webp') return null;
-      const url = this.apiUrl('turntable', item, { r: TURNTABLE.version });
-      const r = await fetch(url, { method: 'PUT', body: blob, credentials: 'same-origin' });
-      return r.ok ? url : null;
+      return await new Promise((resolve) => sheet.toBlob(resolve, 'image/webp', 0.82));
     } finally {
       stage.dispose();
       disposeObject(object);
@@ -2469,6 +2666,9 @@ class MediaLibrary {
   // GLB is used when it is ready; otherwise (and always locally) the original,
   // read from the vault with its textures and .mtl/.bin files resolved next to it.
   async loadModel(item, opts) {
+    const o = opts || {};
+    const say = o.onStage || (() => {});
+    say('Loading 3D viewer…');
     const V = await this.three();
     const T = V.THREE;
     const vault = this.app.vault;
@@ -2502,8 +2702,9 @@ class MediaLibrary {
     };
     const parseGltf = (buf, path) => new Promise((resolve, reject) => gltfLoader().parse(buf, path, (g) => resolve(g.scene), reject));
 
-    if (opts && opts.preferOptimized && this.server) {
+    if (o.preferOptimized && this.server) {
       try {
+        say('Downloading web-optimized model…');
         const r = await fetch(this.apiUrl('model', item), { credentials: 'same-origin' });
         if (r.status === 200) {
           const object = await parseGltf(await r.arrayBuffer(), '');
@@ -2513,6 +2714,8 @@ class MediaLibrary {
       } catch (_) { /* fall back to the original */ }
     }
 
+    manager.onProgress = (url, done, total) => { if (total > 1) say('Loading textures ' + done + ' / ' + total + '…'); };
+    say('Reading ' + item.name + '…');
     const neutral = () => new T.MeshStandardMaterial({ color: 0xb9bdc6, roughness: 0.55, metalness: 0.05 });
     let object;
     if (ext === 'glb' || ext === 'gltf') {
@@ -2552,6 +2755,7 @@ class MediaLibrary {
       throw new Error('Unsupported model format: .' + ext);
     }
     if (loading) await Promise.race([settled, new Promise((resolve) => setTimeout(resolve, 10e3))]);
+    say('Preparing…');
     fixNormals(object);
     return { object, optimized: false };
   }
@@ -2661,6 +2865,48 @@ function disposeObject(object) {
   });
 }
 
+// A clay matcap in the spirit of Blender's default solid view: matte light
+// gray, a soft key light from the upper left, a dim fill, a little rim and
+// sheen. Drawn once per window into a canvas (it is a 2D image of a lit
+// sphere; MeshMatcapMaterial reads the model's normals against it).
+function clayMatcapCanvas() {
+  const n = 256;
+  const c = document.createElement('canvas');
+  c.width = n;
+  c.height = n;
+  const g = c.getContext('2d');
+  const img = g.createImageData(n, n);
+  const norm = (v) => { const l = Math.hypot(v[0], v[1], v[2]); return [v[0] / l, v[1] / l, v[2] / l]; };
+  const key = norm([-0.45, 0.6, 0.66]);
+  const fill = norm([0.65, -0.15, 0.55]);
+  const base = 0.8;   // Blender's default object gray
+  for (let y = 0; y < n; y++) {
+    for (let x = 0; x < n; x++) {
+      const nx = (x + 0.5) / n * 2 - 1;
+      const ny = 1 - (y + 0.5) / n * 2;
+      const r2 = nx * nx + ny * ny;
+      const o = (y * n + x) * 4;
+      if (r2 > 1) { img.data[o + 3] = 0; continue; }
+      const nz = Math.sqrt(1 - r2);
+      const dk = Math.max(0, nx * key[0] + ny * key[1] + nz * key[2]);
+      const df = Math.max(0, nx * fill[0] + ny * fill[1] + nz * fill[2]);
+      // Half-Lambert key so shadows stay soft and readable, like Blender's studio light.
+      let v = base * (0.16 + 0.78 * Math.pow(dk * 0.5 + 0.5, 2) + 0.16 * df);
+      v += 0.1 * Math.pow(1 - nz, 3);                               // rim
+      const hx = key[0], hy = key[1], hz = key[2] + 1;              // half vector with the view
+      const hl = Math.hypot(hx, hy, hz);
+      v += 0.06 * Math.pow(Math.max(0, (nx * hx + ny * hy + nz * hz) / hl), 24);   // sheen
+      const c8 = Math.max(0, Math.min(255, Math.round(255 * Math.pow(v, 1 / 1.1))));
+      img.data[o] = c8;
+      img.data[o + 1] = c8;
+      img.data[o + 2] = Math.min(255, c8 + 2);
+      img.data[o + 3] = 255;
+    }
+  }
+  g.putImageData(img, 0, 0);
+  return c;
+}
+
 // A three.js scene showing one model, framed, with soft studio light.
 // Used by the 3D viewer (on screen) and the turntable renderer (offscreen).
 class ModelStage {
@@ -2688,7 +2934,33 @@ class ModelStage {
     this.pivot = new T.Group();
     this.scene.add(this.pivot);
     this.radius = 1;
+    this.clayed = null;          // [{ o, material }] while clay is on
     if (host) host.appendChild(this.renderer.domElement);
+  }
+
+  // Show every surface in clay (true) or in the model's own materials (false).
+  setClay(on) {
+    const T = this.T;
+    if (!!on === !!this.clayed || !this.object) return;
+    if (on) {
+      if (!this.clayMat) {
+        const tex = new T.CanvasTexture(clayMatcapCanvas());
+        tex.colorSpace = T.SRGBColorSpace;
+        this.clayTex = tex;
+        this.clayMat = new T.MeshMatcapMaterial({ matcap: tex, side: T.DoubleSide });
+        this.clayPoints = new T.PointsMaterial({ color: 0xcccccc, size: this.radius / 150, sizeAttenuation: true });
+      }
+      this.clayed = [];
+      this.object.traverse((o) => {
+        if (o.isMesh || o.isPoints) {
+          this.clayed.push({ o, material: o.material });
+          o.material = o.isPoints ? this.clayPoints : this.clayMat;
+        }
+      });
+    } else {
+      for (const { o, material } of this.clayed) o.material = material;
+      this.clayed = null;
+    }
   }
 
   setObject(object) {
@@ -2724,6 +2996,8 @@ class ModelStage {
   render() { this.renderer.render(this.scene, this.camera); }
 
   dispose() {
+    this.setClay(false);         // hand the model its own materials back, for disposeObject()
+    if (this.clayMat) { this.clayMat.dispose(); this.clayPoints.dispose(); this.clayTex.dispose(); }
     this.pivot.clear();
     if (this.envTex) this.envTex.dispose();
     this.renderer.dispose();
@@ -2740,7 +3014,18 @@ class ModelViewer {
     this.item = item;
     this.opts = opts || {};
     this.el = h('div', 'mpl-3d' + (this.opts.large ? ' is-large' : ''), host);
-    this.status = h('div', 'mpl-3d-status', this.el, 'Loading 3D model…');
+    // Loading screen: the preview frame (when there is one) under a spinner and what is happening.
+    this.status = h('div', 'mpl-3d-status', this.el);
+    const poster = plugin.media.previewNow(item);
+    if (poster) {
+      const im = h('img', 'mpl-3d-poster', this.status);
+      im.src = poster;
+      im.alt = '';
+    }
+    const box = h('div', 'mpl-3d-loading', this.status);
+    h('span', 'mpl-spin-wheel', box);
+    h('div', 'mpl-3d-name', box, item.name);
+    this.stageEl = h('div', 'mpl-3d-stage mpl-mono', box, 'Loading 3D model…');
     this.dead = false;
     this.start();
   }
@@ -2750,10 +3035,14 @@ class ModelViewer {
       const media = this.plugin.media;
       const V = await media.three();
       if (this.dead) return;
-      const { object } = await media.loadModel(this.item, { preferOptimized: true });
+      const { object } = await media.loadModel(this.item, {
+        preferOptimized: true,
+        onStage: (text) => { if (!this.dead && this.stageEl) this.stageEl.textContent = text; },
+      });
       if (this.dead) { disposeObject(object); return; }
       const stage = this.stage = new ModelStage(V, this.el, { width: this.el.clientWidth || 300, height: this.el.clientHeight || 200 });
       stage.setObject(object);
+      if (this.clay || this.opts.clay) stage.setClay(true);
       const controls = this.controls = new V.OrbitControls(stage.camera, stage.renderer.domElement);
       controls.enableDamping = true;
       controls.dampingFactor = 0.12;
@@ -2767,6 +3056,7 @@ class ModelViewer {
       if (this.opts.onReady) this.opts.onReady(this);
     } catch (e) {
       if (this.dead) return;
+      this.status.replaceChildren();
       this.status.textContent = 'Could not show this model: ' + ((e && e.message) || e);
       this.status.classList.add('is-error');
     }
@@ -2784,6 +3074,13 @@ class ModelViewer {
       if (this.controls.autoRotate || performance.now() < this.until) this.raf = requestAnimationFrame(tick);
     };
     this.raf = requestAnimationFrame(tick);
+  }
+
+  setClay(on) {
+    this.clay = !!on;
+    if (!this.stage) return;
+    this.stage.setClay(this.clay);
+    this.kick();
   }
 
   setAutoRotate(on) {
@@ -2809,6 +3106,21 @@ class ModelViewer {
     if (this.stage) { disposeObject(this.stage.object); this.stage.dispose(); }
     this.el.remove();
   }
+}
+
+// The 3D viewer's buttons: clay, auto-rotate, reset.
+function modelTools(parent, viewer) {
+  const clay = dbutton(parent, 'clay', 'Clay (show surfaces without materials)', () => {
+    const on = !clay.classList.contains('is-active');
+    clay.classList.toggle('is-active', on);
+    viewer.setClay(on);
+  });
+  const spin = dbutton(parent, 'rotate', 'Auto-rotate', () => {
+    const on = !spin.classList.contains('is-active');
+    spin.classList.toggle('is-active', on);
+    viewer.setAutoRotate(on);
+  });
+  dbutton(parent, 'reset', 'Reset view', () => viewer.reset());
 }
 
 // Show a media item's picture in an <img>: right away when there is a URL,
@@ -2853,15 +3165,87 @@ function mountMediaPicture(plugin, host, item, opts) {
       const rows = Math.ceil(state.frames / cols);
       host.style.backgroundPosition = ((k % cols) / Math.max(1, cols - 1)) * 100 + '% ' + (Math.floor(k / cols) / Math.max(1, rows - 1)) * 100 + '%';
     }
+    if (state.paintTimeline) state.paintTimeline();
     if (o.onFrame) o.onFrame(k, state.frames);
   };
   state.setFrame = setFrame;
+
+  // Frozen preview: a frame picked on the timeline, kept in the library's
+  // metadata (data.json), shown instead of scrubbing until it is reset.
+  const meta = () => plugin.settings.library[item.path] || {};
+  const frozen = () => Number.isInteger(meta().frame);
+  const restFrame = () => (frozen() && state.frames ? Math.min(state.frames - 1, Math.max(0, meta().frame)) : 0);
+  const frameAt = (x, el) => {
+    const r = el.getBoundingClientRect();
+    return Math.floor(Math.max(0, Math.min(0.9999, (x - r.left) / r.width)) * state.frames);
+  };
+  let tl = null;
+
+  // Hover scrubs the turn (unless frozen); with o.timeline, a bar appears
+  // on hover: hover it to look, click to freeze there, reset to unfreeze.
+  const enableScrub = () => {
+    host.classList.add('is-scrub');
+    if (o.scrub === false) { setFrame(0); return; }
+    if (o.timeline) buildTimeline();
+    setFrame(restFrame());
+    host.addEventListener('pointermove', (e) => {
+      if (e.buttons || frozen() || (tl && tl.contains(e.target))) return;
+      setFrame(frameAt(e.clientX, host));
+    });
+    host.addEventListener('pointerleave', () => { host.classList.remove('is-hovering'); setFrame(restFrame()); });
+    // A class, not :hover alone: :hover can lag a frame behind, and the bar must take the click.
+    host.addEventListener('pointerenter', (e) => { if (e.pointerType !== 'touch') host.classList.add('is-hovering'); });
+  };
+
+  const buildTimeline = () => {
+    tl = h('div', 'mpl-tl', host);
+    const track = h('div', 'mpl-tl-track', tl);
+    const fill = h('div', 'mpl-tl-fill', track);
+    const mark = h('div', 'mpl-tl-mark', track);
+    track.setAttribute('role', 'slider');
+    track.setAttribute('aria-label', 'Pick the angle to show');
+    const paint = () => {
+      const f = frozen();
+      host.classList.toggle('is-frozen', f);
+      mark.style.left = (f ? ((restFrame() + 0.5) / state.frames) * 100 : 0) + '%';
+    };
+    state.paintTimeline = () => {
+      fill.style.width = (state.frames ? ((state.frame + 1) / state.frames) * 100 : 0) + '%';
+    };
+    dbutton(tl, 'reset', 'Unfreeze (hover to turn again)', () => {
+      plugin.setMeta(item.path, { frame: null });
+      paint();
+      setFrame(0);
+    }, 'mpl-tl-reset');
+    // The bar belongs to itself: no card selection, no board drag, no card drag.
+    const stop = (e) => e.stopPropagation();
+    for (const ev of ['pointerdown', 'mousedown', 'click', 'dblclick', 'contextmenu']) tl.addEventListener(ev, stop);
+    tl.addEventListener('pointerdown', () => {
+      const d = host.closest('[draggable="true"]');
+      if (!d) return;
+      d.draggable = false;
+      const win = host.ownerDocument.defaultView || window;
+      const back = () => { d.draggable = true; win.removeEventListener('pointerup', back, true); };
+      win.addEventListener('pointerup', back, true);
+    });
+    track.addEventListener('pointermove', (e) => { if (!e.buttons) setFrame(frameAt(e.clientX, track)); });
+    track.addEventListener('pointerleave', () => { if (frozen()) setFrame(restFrame()); });
+    track.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      const k = frameAt(e.clientX, track);
+      plugin.setMeta(item.path, { frame: k });
+      setFrame(k);
+      paint();
+    });
+    paint();
+  };
 
   const scrubbable = (flip) => {
     state.flipbook = flip;
     state.frames = flip.frames.length;
     showImage(flip.frame(0));
-    host.classList.add('is-scrub');
+    enableScrub();
     if (o.scrub !== false) {
       host.addEventListener('pointerenter', () => {
         // Warm the cache so scrubbing is smooth (small thumbnails only).
@@ -2872,36 +3256,37 @@ function mountMediaPicture(plugin, host, item, opts) {
           if (q) { const im = new Image(); im.decoding = 'async'; im.src = q; }
         }
       });
-      host.addEventListener('pointermove', (e) => {
-        if (e.buttons) return;
-        const r = host.getBoundingClientRect();
-        setFrame(Math.floor(Math.max(0, Math.min(0.9999, (e.clientX - r.left) / r.width)) * state.frames));
-      });
     }
   };
 
   if (item.kind === 'image') showImage(item);
   else if (item.kind === 'flipbook') scrubbable(item);
   else if (item.kind === 'model') {
-    host.classList.add('is-model');
-    media.turntable(item).then((tt) => {
+    host.classList.add('is-model', 'is-rendering');
+    const spin = h('div', 'mpl-spin', host);
+    h('span', 'mpl-spin-wheel', spin);
+    h('span', 'mpl-spin-label', spin, 'Rendering preview…');
+    const done = () => { host.classList.remove('is-rendering'); spin.remove(); };
+    media.turntable(item, {
+      onPoster: (url) => {
+        if (state.sheet) return;
+        img.src = url;
+        host.classList.add('is-poster');
+        done();
+      },
+    }).then((tt) => {
+      done();
       if (!img.isConnected && !host.isConnected) return;
-      if (!tt) { host.classList.add('is-none'); return; }
-      if (tt.flipbook) { scrubbable(tt.flipbook); return; }
+      if (!tt) { if (!host.classList.contains('is-poster')) host.classList.add('is-none'); return; }
+      if (tt.flipbook) { host.classList.remove('is-poster'); scrubbable(tt.flipbook); return; }
+      host.classList.remove('is-poster');
       img.remove();
       state.sheet = tt;
       state.frames = tt.frames;
-      host.classList.add('is-sheet', 'is-scrub');
+      host.classList.add('is-sheet');
       host.style.backgroundImage = 'url("' + tt.sheet + '")';
       host.style.backgroundSize = (tt.cols * 100) + '% ' + (Math.ceil(tt.frames / tt.cols) * 100) + '%';
-      setFrame(0);
-      if (o.scrub !== false) {
-        host.addEventListener('pointermove', (e) => {
-          if (e.buttons) return;
-          const r = host.getBoundingClientRect();
-          setFrame(Math.floor(Math.max(0, Math.min(0.9999, (e.clientX - r.left) / r.width)) * state.frames));
-        });
-      }
+      enableScrub();
       if (o.onSheet) o.onSheet(tt);
     });
   }
@@ -3105,7 +3490,7 @@ class ImageLibraryView extends obsidian.ItemView {
     this.cards = new Map();          // TFile -> { el, path, mtime, thumb }
     this.aspects = new Map();        // path -> width / height
     this.dims = new Map();           // path -> [w, h]
-    this.collapsed = new Set();      // folder paths folded in the sidebar
+    this.collapsed = new Set(plugin.settings.libraryUi.collapsed || []);   // folder paths folded in the sidebar
     this.colCount = 0;
     this.built = false;
     this.focusIn = 'grid';           // where the selection lives: grid | board
@@ -3167,6 +3552,7 @@ class ImageLibraryView extends obsidian.ItemView {
       if (this.selected.delete(oldPath)) this.selected.add(f.path);
       const fv = this.filter.kind === 'folder' ? this.filter.value : null;
       if (fv && (fv === oldPath || fv.startsWith(oldPath + '/'))) this.filter = { kind: 'folder', value: f.path + fv.slice(oldPath.length) };
+      if (f instanceof obsidian.TFolder) this.collapsed = new Set(this.ui().collapsed || []);
       if (this.plugin.media.relevant(f)) this.scheduleRefresh();
     }));
 
@@ -3584,6 +3970,23 @@ class ImageLibraryView extends obsidian.ItemView {
         .concat(all.some((f) => f.kind === 'flipbook') ? [{ label: 'Flipbooks', count: all.filter((f) => f.kind === 'flipbook').length, filter: { kind: 'flipbooks' }, color: '#5C3F4F' }] : []),
     });
 
+    // Favorites: folders, tags and smart folders starred for quick access.
+    const favRows = [];
+    for (const fav of this.ui().favorites) {
+      if (fav.kind === 'folder') {
+        if (!(this.app.vault.getAbstractFileByPath(fav.value) instanceof obsidian.TFolder)) continue;
+        favRows.push({ label: fav.value.split('/').pop(), title: fav.value, count: counts.get(fav.value) || 0, filter: fav, folder: fav.value, color: colors.get(fav.value) || hashColor(fav.value), fav: true });
+      } else if (fav.kind === 'tag') {
+        favRows.push({ label: fav.value, count: all.filter((f) => hasTag(this.info(f).tags, fav.value)).length, filter: fav, color: hashColor('tag:' + fav.value), initial: '#', fav: true });
+      } else if (fav.kind === 'smart') {
+        const sm = this.smartFolder(fav.value);
+        if (!sm) continue;
+        const q = parseQuery(sm.query);
+        favRows.push({ label: sm.name, count: all.filter((f) => matchesQuery(this.info(f), q)).length, filter: fav, color: hashColor('smart:' + sm.name), smart: sm, fav: true });
+      }
+    }
+    if (favRows.length) sections.push({ title: 'Favorites', rows: favRows });
+
     const folderRows = [];
     const tree = (folder, depth) => {
       const kids = folder.children
@@ -3658,16 +4061,54 @@ class ImageLibraryView extends obsidian.ItemView {
         caret.toggleClass('is-collapsed', o.caret === 'closed');
         caret.addEventListener('click', (e) => {
           e.stopPropagation();
-          if (this.collapsed.has(o.folder)) this.collapsed.delete(o.folder); else this.collapsed.add(o.folder);
-          this.renderSidebar(this.allImages());
+          this.toggleFolder(o.folder);
         });
       }
     }
     this.chip(row, o);
     row.createSpan({ cls: 'mpl-label', text: o.label });
+    if (o.title) row.setAttribute('title', o.title);
+    if (this.canFavorite(o.filter)) {
+      const on = this.isFavorite(o.filter);
+      const star = dbutton(row, 'star', on ? 'Remove from favorites' : 'Add to favorites', () => this.toggleFavorite(o.filter), 'mpl-star' + (on ? ' is-on' : ''));
+      star.tabIndex = -1;
+    }
     row.createSpan({ cls: 'mpl-count', text: o.count.toLocaleString() });
     this.wireRow(row, o);
     return row;
+  }
+
+  // -- folds and favorites --------------------------------------------------
+
+  // Fold or unfold a folder in the sidebar. The folds are part of the
+  // library's shared state (data.json), so every device shows the same tree.
+  toggleFolder(path, collapsed) {
+    const fold = collapsed == null ? !this.collapsed.has(path) : !!collapsed;
+    if (fold) this.collapsed.add(path); else this.collapsed.delete(path);
+    this.ui().collapsed = [...this.collapsed];
+    this.plugin.saveLibrarySoon();
+    this.renderSidebar(this.allImages());
+  }
+
+  // The library's shared state changed on another device: show it.
+  sharedChanged() {
+    if (!this.built) return;
+    this.collapsed = new Set(this.ui().collapsed || []);
+    this.rootEl.dataset.accent = this.ui().accent || 'amber';
+    if (this.filter.kind === 'smart' && !this.smartFolder(this.filter.value)) this.filter = { kind: 'all' };
+    this.refresh();
+  }
+
+  canFavorite(f) { return !!f && (f.kind === 'folder' || f.kind === 'tag' || f.kind === 'smart'); }
+
+  isFavorite(f) { return this.ui().favorites.some((x) => sameFilter(x, f)); }
+
+  toggleFavorite(f) {
+    const ui = this.ui();
+    if (this.isFavorite(f)) ui.favorites = ui.favorites.filter((x) => !sameFilter(x, f));
+    else ui.favorites = ui.favorites.concat([{ kind: f.kind, value: f.value }]);
+    this.plugin.saveLibrarySoon();
+    this.renderSidebar(this.allImages());
   }
 
   railChip(parent, o) {
@@ -3681,12 +4122,20 @@ class ImageLibraryView extends obsidian.ItemView {
 
   wireRow(el, o) {
     el.addEventListener('click', () => this.setFilter(o.filter));
+    if (this.canFavorite(o.filter) && o.folder == null && !o.smart) {
+      el.addEventListener('contextmenu', (e) => {
+        const menu = new obsidian.Menu();
+        this.favoriteMenuItem(menu, o.filter);
+        menu.showAtMouseEvent(e);
+      });
+    }
     el.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); this.setFilter(o.filter); }
     });
     if (o.folder != null) {
       el.addEventListener('contextmenu', (e) => {
         const menu = new obsidian.Menu();
+        this.favoriteMenuItem(menu, o.filter);
         menu.addItem((i) => i.setTitle('Save clipped images here').setIcon('image-down')
           .setChecked(this.plugin.settings.targetFolder === o.folder)
           .onClick(() => this.plugin.setTarget(o.folder)));
@@ -3697,12 +4146,18 @@ class ImageLibraryView extends obsidian.ItemView {
     if (o.smart) {
       el.addEventListener('contextmenu', (e) => {
         const menu = new obsidian.Menu();
+        this.favoriteMenuItem(menu, o.filter);
         menu.addItem((i) => i.setTitle('Edit search…').setIcon('search').onClick(() => this.editSmart(o.smart)));
         menu.addItem((i) => i.setTitle('Rename…').setIcon('pencil').onClick(() => this.renameSmart(o.smart)));
         menu.addItem((i) => i.setTitle('Delete smart folder').setIcon('trash-2').onClick(() => this.deleteSmart(o.smart)));
         menu.showAtMouseEvent(e);
       });
     }
+  }
+
+  favoriteMenuItem(menu, f) {
+    const on = this.isFavorite(f);
+    menu.addItem((i) => i.setTitle(on ? 'Remove from favorites' : 'Add to favorites').setIcon('star').onClick(() => this.toggleFavorite(f)));
   }
 
   // -- smart folders (saved searches) ---------------------------------------
@@ -3742,6 +4197,7 @@ class ImageLibraryView extends obsidian.ItemView {
     new PromptModal(this.app, 'Rename smart folder', 'Name', (v) => {
       const name = this.uniqueSmartName(String(v).trim() || s.name, s);
       const active = this.filter.kind === 'smart' && this.filter.value === s.name;
+      for (const fav of this.ui().favorites) if (fav.kind === 'smart' && fav.value === s.name) fav.value = name;
       s.name = name;
       if (active) this.filter = { kind: 'smart', value: name };
       this.plugin.saveLibrarySoon();
@@ -3752,6 +4208,7 @@ class ImageLibraryView extends obsidian.ItemView {
   deleteSmart(s) {
     const ui = this.ui();
     ui.smart = (ui.smart || []).filter((x) => x !== s);
+    ui.favorites = ui.favorites.filter((f) => !(f.kind === 'smart' && f.value === s.name));
     this.plugin.saveLibrarySoon();
     this.refresh();
   }
@@ -3853,7 +4310,8 @@ class ImageLibraryView extends obsidian.ItemView {
     if (a) thumb.style.aspectRatio = String(a);
     // Only an original's pixel size is the image's size (thumbnails are smaller).
     const original = f.kind === 'image' && !media.server && media.support(f) === 'web';
-    const pic = mountMediaPicture(this.plugin, thumb, f, { width: THUMB_W, lazy: true });
+    const pic = mountMediaPicture(this.plugin, thumb, f, { width: THUMB_W, lazy: true, timeline: true });
+    if (f.kind !== 'image') el.addClass('has-timeline');
     pic.img.addEventListener('load', () => {
       const im = pic.img;
       if (!(im.naturalWidth > 0)) return;
@@ -4060,8 +4518,7 @@ class ImageLibraryView extends obsidian.ItemView {
     if (f.kind === 'model') {
       const viewer = this.fullWidget = new ModelViewer(frame, this.plugin, f, { large: true });
       const tools = createDiv({ cls: 'mpl-full-tools' });
-      const spin = dbutton(tools, 'rotate', 'Auto-rotate', () => { spin.toggleClass('is-active', !spin.hasClass('is-active')); viewer.setAutoRotate(spin.hasClass('is-active')); });
-      dbutton(tools, 'reset', 'Reset view', () => viewer.reset());
+      modelTools(tools, viewer);
       top.insertBefore(tools, top.querySelector('.mpl-spacer').nextSibling);
       hint = 'Drag to orbit · right-drag to pan · wheel to zoom · Esc to close · ← → to step';
     } else if (f.kind === 'flipbook') {
@@ -4804,11 +5261,19 @@ const ACCENTS = [['amber', 'Amber'], ['blue', 'Blue'], ['violet', 'Violet'], ['g
 
 class MarkportClipperPlugin extends obsidian.Plugin {
   async onload() {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    this.settings = mergeSettings(DEFAULT_SETTINGS, await this.loadData(), this.loadDevice());
     this.initLibrary();
     this.libraryViews = new Set();
     this.media = new MediaLibrary(this);
     await this.media.init();
+    // First run with device storage: keep this device's layout and key out of data.json from now on.
+    if (!this.loadDevice()) this.saveDevice(deviceSettings(this.settings));
+    const dataFile = (this.manifest.dir || (this.app.vault.configDir + '/plugins/' + this.manifest.id)) + '/data.json';
+    this.registerEvent(this.app.vault.on('raw', (path) => {
+      if (path !== dataFile) return;
+      clearTimeout(this.reloadTimer);
+      this.reloadTimer = setTimeout(() => this.reloadShared(), 400);
+    }));
     for (const ev of ['create', 'delete', 'rename', 'modify']) {
       this.registerEvent(this.app.vault.on(ev, (f) => { if (this.media.relevant(f)) this.media.invalidate(); }));
     }
@@ -4818,6 +5283,7 @@ class MarkportClipperPlugin extends obsidian.Plugin {
 
     this.registerView(LIBRARY_VIEW, (leaf) => new ImageLibraryView(leaf, this));
     this.registerView(PIN_VIEW, (leaf) => new PinnedBoardView(leaf, this));
+    this.registerMediaExtensions();
     this.addRibbonIcon('images', 'Open image library', () => this.openLibrary());
     this.addCommand({ id: 'open-library', name: 'Open image library', callback: () => this.openLibrary() });
     this.addCommand({ id: 'new-board', name: 'New board', callback: async () => (await this.openLibrary()).newBoard() });
@@ -4831,11 +5297,13 @@ class MarkportClipperPlugin extends obsidian.Plugin {
     // Library metadata follows files and folders around, and goes with them.
     this.registerEvent(this.app.vault.on('rename', (file, oldPath) => {
       if (renameLibraryKeys(this.settings.library, oldPath, file.path)) this.saveLibrarySoon();
+      if (file instanceof obsidian.TFolder && renameUiPaths(this.settings.libraryUi, oldPath, file.path)) this.saveLibrarySoon();
       if (isCanvasFile(file)) this.boardRenamed(oldPath, file.path);
       else if (this.media.relevant(file)) this.relinkBoards(oldPath, file.path);
     }));
     this.registerEvent(this.app.vault.on('delete', (file) => {
       if (dropLibraryKeys(this.settings.library, file.path)) this.saveLibrarySoon();
+      if (file instanceof obsidian.TFolder && dropUiPaths(this.settings.libraryUi, file.path)) this.saveLibrarySoon();
       if (isCanvasFile(file)) this.boardDeleted(file.path);
     }));
     this.registerEvent(this.app.vault.on('modify', (file) => {
@@ -4891,9 +5359,27 @@ class MarkportClipperPlugin extends obsidian.Plugin {
     } else if (this.canServe()) {
       if (!this.settings.pairingKey) {
         this.settings.pairingKey = generateKey();
-        await this.saveData(this.settings);
+        await this.persist();
       }
       this.app.workspace.onLayoutReady(() => this.startServer());
+    }
+  }
+
+  // 3D models and images Obsidian does not show itself: open them in a
+  // MediaFileView, which also makes the file explorer list them. Obsidian's
+  // own formats, and any extension another plugin already took, are left alone.
+  registerMediaExtensions() {
+    const F = this.media.F;
+    const native = new Set(['png', 'jpg', 'jpeg', 'gif', 'bmp', 'svg', 'webp', 'avif']);
+    const wanted = (F.MODEL || ['glb', 'gltf', 'obj', 'fbx', 'stl', 'ply', '3mf', 'dae', 'usdz'])
+      .concat(F.LOCAL_DECODE || [], F.SERVER_IMAGE || []).filter((e) => !native.has(e));
+    this.mediaExtensions = new Set();
+    this.registerView(MEDIA_FILE_VIEW, (leaf) => new MediaFileView(leaf, this));
+    for (const ext of wanted) {
+      try {
+        this.registerExtensions([ext], MEDIA_FILE_VIEW);
+        this.mediaExtensions.add(ext);
+      } catch (_) { /* already registered elsewhere */ }
     }
   }
 
@@ -4904,6 +5390,7 @@ class MarkportClipperPlugin extends obsidian.Plugin {
     const ui = Object.assign({
       sort: 'added', thumb: 160, sideMin: false, gridMin: false, boardMin: false, restore: null,
       gridW: 0, boards: [], board: '', views: {}, smart: [], accent: 'amber',
+      collapsed: [], favorites: [],
     }, this.settings.libraryUi);
     // 0.2: a sidebar on/off switch and a docked inspector.
     if ('sidebar' in ui) { if (ui.sidebar === false) ui.sideMin = true; delete ui.sidebar; }
@@ -4913,6 +5400,9 @@ class MarkportClipperPlugin extends obsidian.Plugin {
     if (typeof ui.board !== 'string' || (ui.board && !ui.boards.includes(ui.board))) ui.board = ui.boards[0] || '';
     if (!ui.views || typeof ui.views !== 'object') ui.views = {};
     if (!Array.isArray(ui.smart)) ui.smart = [];
+    if (!Array.isArray(ui.collapsed)) ui.collapsed = [];
+    delete ui.mirrorFolds;
+    ui.favorites = (Array.isArray(ui.favorites) ? ui.favorites : []).filter((f) => f && typeof f.kind === 'string');
     if (!ACCENTS.some(([v]) => v === ui.accent)) ui.accent = 'amber';
     this.settings.libraryUi = ui;
     if (typeof this.settings.boardsFolder !== 'string') this.settings.boardsFolder = 'Boards';
@@ -4934,8 +5424,55 @@ class MarkportClipperPlugin extends obsidian.Plugin {
     clearTimeout(this.libraryTimer);
     this.libraryTimer = setTimeout(() => {
       this.libraryTimer = null;
-      this.saveData(this.settings);
+      this.persist();
     }, 800);
+  }
+
+  // ── shared and per-device settings ──
+
+  loadDevice() {
+    try {
+      if (typeof this.app.loadLocalStorage === 'function') return this.app.loadLocalStorage(DEVICE_STORE) || null;
+      const raw = window.localStorage.getItem(DEVICE_STORE + ':' + this.app.vault.getName());
+      return raw ? JSON.parse(raw) : null;
+    } catch (_) { return null; }
+  }
+
+  saveDevice(value) {
+    try {
+      if (typeof this.app.saveLocalStorage === 'function') this.app.saveLocalStorage(DEVICE_STORE, value);
+      else window.localStorage.setItem(DEVICE_STORE + ':' + this.app.vault.getName(), JSON.stringify(value));
+    } catch (_) { /* private mode: the layout just is not remembered */ }
+  }
+
+  // Write the shared part to data.json, this device's part to local storage.
+  async persist() {
+    this.saveDevice(deviceSettings(this.settings));
+    const shared = sharedSettings(this.settings);
+    this.lastShared = JSON.stringify(shared);
+    await this.saveData(shared);
+  }
+
+  // data.json changed from outside: another device's folds, favorites, tags,
+  // notes, smart folders. Obsidian calls this when it notices (desktop);
+  // the 'raw' listener in onload covers the rest.
+  async onExternalSettingsChange() {
+    await this.reloadShared();
+  }
+
+  async reloadShared() {
+    if (this.libraryTimer) return;          // our own change is about to be written: it wins
+    let data;
+    try { data = await this.loadData(); } catch (_) { return; }
+    if (!data) return;
+    const json = JSON.stringify(data);
+    if (json === this.lastShared) return;   // our own write coming back
+    this.lastShared = json;
+    this.settings = mergeSettings(DEFAULT_SETTINGS, data, deviceSettings(this.settings));
+    this.initLibrary();
+    this.media.invalidate();
+    this.updateStatus();
+    for (const v of this.libraryViews) v.sharedChanged();
   }
 
   // Every media item: images, 3D models and flipbooks (see MediaLibrary).
@@ -5208,7 +5745,8 @@ class MarkportClipperPlugin extends obsidian.Plugin {
     if (this.pipWindow) { try { this.pipWindow.close(); } catch (_) { /* gone */ } }
     if (this.libraryTimer) {
       clearTimeout(this.libraryTimer);
-      this.saveData(this.settings);
+      this.libraryTimer = null;
+      this.persist();
     }
     if (this.isMarkport() && window.__markportClipper) delete window.__markportClipper;
     if (this.server) {
@@ -5322,7 +5860,7 @@ class MarkportClipperPlugin extends obsidian.Plugin {
   }
 
   async saveSettings() {
-    await this.saveData(this.settings);
+    await this.persist();
     this.updateStatus();
   }
 
@@ -5344,6 +5882,9 @@ class MarkportClipperPlugin extends obsidian.Plugin {
       vault: this.app.vault.getName(),
       target: this.settings.targetFolder,
       folders: [''].concat(this.listFolders()),
+      // Folders starred in the image library: the extension lists them first.
+      favorites: ((this.settings.libraryUi && this.settings.libraryUi.favorites) || []).filter((f) => f.kind === 'folder').map((f) => f.value)
+        .filter((p) => this.app.vault.getAbstractFileByPath(p) instanceof obsidian.TFolder),
       createNote: this.settings.createNote,
     };
   }
@@ -5421,6 +5962,6 @@ module.exports.helpers = {
   extFromMime, sanitizeName, nameFromUrl, buildFileName, normalizeFolder, uniquePath, buildNote,
   generateKey, checkRequest, BASE_PORT, PORT_COUNT,
   formatBytes, normalizeTag, parseQuery, matchesQuery, renameLibraryKeys, dropLibraryKeys, dominantColors,
-  hexToRgb, colorTarget, parseCanvas, serializeCanvas, canvasImagePaths, renameInCanvas, boxAround, fitView,
+  renameUiPaths, dropUiPaths, sharedSettings, deviceSettings, mergeSettings, hexToRgb, colorTarget, parseCanvas, serializeCanvas, canvasImagePaths, renameInCanvas, boxAround, fitView,
   simplifyPoints, strokePath, canvasColor, boardName, looksLikeSequence, MediaItem,
 };

@@ -94,14 +94,28 @@
   // to first (top left), then the other recent ones, the default folder, and
   // every other folder in tree order. Recent folders that are no longer in
   // the vault (deleted or renamed since) are left out.
-  function folderGrid(target, recent, folders) {
+  function folderGrid(target, recent, folders, exclude) {
     const all = Array.isArray(folders) ? folders : [];
     const known = new Set(all);
+    const skip = new Set(Array.isArray(exclude) ? exclude : []);
     const out = [];
-    const add = (f) => { if (typeof f === 'string' && !out.includes(f)) out.push(f); };
+    const add = (f) => { if (typeof f === 'string' && !out.includes(f) && !skip.has(f)) out.push(f); };
     for (const f of Array.isArray(recent) ? recent : []) if (!all.length || known.has(f)) add(f);
     add(target);
     all.forEach(add);
+    return out;
+  }
+
+  // The folders starred in the image library (its Favorites), in their
+  // order, without duplicates and without ones the vault no longer has.
+  function favoriteFolders(favorites, folders) {
+    const all = Array.isArray(folders) ? folders : null;
+    const known = all && new Set(all);
+    const out = [];
+    for (const f of Array.isArray(favorites) ? favorites : []) {
+      if (typeof f !== 'string' || out.includes(f) || (known && !known.has(f))) continue;
+      out.push(f);
+    }
     return out;
   }
 
@@ -145,7 +159,7 @@
   const api = {
     DEFAULT_ORIGINS, MAX_BYTES, BASE_PORT, PORT_COUNT,
     normalizeOrigin, originMatches, normalizeKey, vaultId, vaultLabel,
-    sniffMime, resolveMime, bytesToBase64, pickVault, folderGrid, folderTree, cropRect,
+    sniffMime, resolveMime, bytesToBase64, pickVault, folderGrid, favoriteFolders, folderTree, cropRect,
   };
   if (typeof module === 'object' && module.exports) module.exports = api;
   else root.MarkportLib = api;

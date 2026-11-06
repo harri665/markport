@@ -11,6 +11,7 @@
  *                            RoomEnvironment, GLTFExporter, the meshopt decoder
  *   vendor-draco-decoder.js  Draco decoder, plain-JS build (for Draco glTFs)
  *   vendor-decoders.js       ag-psd (PSD/PSB), utif2 (TIFF), fflate (zip)
+ *   vendor-heif.js           libheif-js (HEIC/HEIF), WebAssembly included
  *   vendor-licenses.txt      their license notices
  *
  * The plugin reads a vendor file through the vault adapter and evaluates it
@@ -78,6 +79,12 @@ async function main() {
   fs.writeFileSync(path.join(OUT, 'vendor-draco-decoder.js'), banner('Draco decoder (three.js ' + three + ')') + '\n' + fs.readFileSync(draco, 'utf8'));
   console.log('vendor-draco-decoder.js'.padEnd(26) + (fs.statSync(path.join(OUT, 'vendor-draco-decoder.js')).size / 1024).toFixed(0).padStart(6) + ' KB');
 
+  // libheif (HEIC/HEIF, iPhone photos): its own self-contained build, with the
+  // WebAssembly inside the file. Loaded only when a HEIC needs decoding.
+  const heifSrc = path.join(__dirname, 'node_modules', 'libheif-js', 'libheif-wasm', 'libheif-bundle.js');
+  fs.writeFileSync(path.join(OUT, 'vendor-heif.js'), banner('libheif-js ' + pkg('libheif-js').version + ' (LGPL-3.0)') + '\n' + fs.readFileSync(heifSrc, 'utf8'));
+  console.log('vendor-heif.js'.padEnd(26) + (fs.statSync(path.join(OUT, 'vendor-heif.js')).size / 1024).toFixed(0).padStart(6) + ' KB');
+
   await bundle('vendor-decoders.js', `
     export { readPsd, initializeCanvas } from 'ag-psd';
     export * as UTIF from 'utif2';
@@ -86,7 +93,7 @@ async function main() {
   `, 'ag-psd, utif2, fflate');
 
   const licenses = [];
-  for (const name of ['three', 'ag-psd', 'utif2', 'fflate']) {
+  for (const name of ['three', 'ag-psd', 'utif2', 'fflate', 'libheif-js']) {
     const dir = path.join(__dirname, 'node_modules', name);
     const file = fs.readdirSync(dir).find((f) => /^licen[cs]e/i.test(f));
     licenses.push('='.repeat(78) + '\n' + name + ' ' + pkg(name).version + (pkg(name).license ? ' (' + pkg(name).license + ')' : '') + '\n' + '='.repeat(78) + '\n\n'

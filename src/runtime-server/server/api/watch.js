@@ -42,6 +42,11 @@ function isHidden(rel) {
   return rel.split('/').some((s) => s.startsWith('.'));
 }
 
+// Hidden, but still reported when written through /api/fs: the image
+// library's shared state (markport-clipper's data.json - folder folds,
+// favorites, tags), so open sessions and Markport Sync see it right away.
+const LIVE_HIDDEN = new Set(['.obsidian/plugins/markport-clipper/data.json']);
+
 // opts.isOwner(req)            owner-login check (auth.js)
 // opts.shareTarget(req, id)    for a share vault: { root, filter(rel) → rel|null }
 //                              or { error }; null when id is not a share
@@ -87,7 +92,7 @@ function attachWatchServer(httpServer, vaultRegistry, fallbackVaultRoot, opts = 
   // Send one change to the clients of one watcher. skipClient: the session
   // that made the change.
   function deliver(entry, eventType, relative, skipClient) {
-    if (!relative || isHidden(relative)) return;
+    if (!relative || (isHidden(relative) && !LIVE_HIDDEN.has(relative))) return;
     for (const [ws, c] of entry.clients) {
       if (skipClient && c.client === skipClient) continue;
       const rel = c.filter ? c.filter(relative) : relative;

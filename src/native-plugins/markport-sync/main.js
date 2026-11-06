@@ -79,7 +79,12 @@ const CONFIG_SKIP = ['workspace.json', 'workspace-mobile.json'];
 const COMMUNITY = CONFIG + '/community-plugins.json';
 // Markport's own plugins, served to every server vault from the repo. The
 // server's /api/fs/tree adds any others it serves the same way.
-const SYSTEM_PLUGINS_FALLBACK = ['markport-clipper', 'markport-share', 'obsidian-web-layout'];
+const SYSTEM_PLUGINS_FALLBACK = ['markport-clipper', 'markport-root-folder', 'markport-share', 'obsidian-web-layout'];
+
+// Synced with every link that covers the whole vault, even with "Sync
+// settings and plugins" off: the image library's shared state (tags, notes,
+// folder folds, favorites, smart folders), which the clipper picks up live.
+const ALWAYS_CONFIG = [CONFIG + '/plugins/markport-clipper/data.json'];
 
 // ── Pure helpers (exported for tests) ───────────────────────────────────────
 
@@ -523,6 +528,11 @@ class LinkSync {
       else this.setStatus(this.status, String(msg.message || 'server error'));
       return;
     }
+    // The one hidden file the server reports: the image library's state.
+    if (ALWAYS_CONFIG.includes(msg.path)) {
+      if (this.syncsConfig()) this.later('config', 1000, 'image library', () => this.reconcileConfig());
+      return;
+    }
     if (typeof msg.path !== 'string' || !msg.path || isHidden(msg.path)) return;
     if (msg.type === 'add' || msg.type === 'change' || msg.type === 'unlink') {
       this.schedulePath(msg.path, 150);
@@ -832,8 +842,14 @@ class LinkSync {
   // configSynced() says what is left out. Obsidian reads most of these files
   // at startup, so what arrives from the server is used after a reload.
 
+  // Whole-vault links always compare the files in ALWAYS_CONFIG, and all of
+  // .obsidian when "Sync settings and plugins" is on.
   syncsConfig() {
-    return this.folder === '' && !!this.plugin.settings.syncConfig;
+    return this.folder === '';
+  }
+
+  syncsAllConfig() {
+    return this.syncsConfig() && !!this.plugin.settings.syncConfig;
   }
 
   configState() {
@@ -842,6 +858,7 @@ class LinkSync {
   }
 
   configAllowed(rel) {
+    if (!this.syncsAllConfig()) return ALWAYS_CONFIG.includes(rel);
     return configSynced(rel, this.systemIds || SYSTEM_PLUGINS_FALLBACK, this.plugin.manifest.id);
   }
 
@@ -946,7 +963,12 @@ class LinkSync {
           files[rel] = { rm: remote.mtime, rs: remote.size, lm: local.mtime, ls: local.size };
           return false;
         }
-        if (!base || local.mtime >= remote.mtime) {
+        // No base yet: with "Sync settings and plugins" this device's setup
+        // wins (it was turned on here for that). Otherwise this is only the
+        // image library, and a device joining takes the server's - a fresh
+        // install must never replace everyone's tags and folders.
+        const hereWins = base ? local.mtime >= remote.mtime : this.syncsAllConfig();
+        if (hereWins) {
           await this.trashRemote(rel);
           await this.pushConfig(rel, localBuf);
           return false;
@@ -1238,13 +1260,16 @@ class MarkportSyncPlugin extends obsidian.Plugin {
     if (typeof p !== 'string' || !p.startsWith(dir + '/')) return;
     const rel = CONFIG + p.slice(dir.length);
     for (const l of this.links.values()) {
-      if (l.syncsConfig() && l.configAllowed(rel)) l.later('config', 5000, 'settings and plugins', () => l.reconcileConfig());
+      if (l.syncsConfig() && l.configAllowed(rel)) l.later('config', ALWAYS_CONFIG.includes(rel) ? 1500 : 5000, 'settings and plugins', () => l.reconcileConfig());
     }
   }
 
   // Settings or plugins came from the server. Obsidian reads most of them
   // at startup, so offer a reload.
   configArrived(paths) {
+    // The image library reloads its own state; nothing to restart for that.
+    paths = paths.filter((p) => !ALWAYS_CONFIG.includes(p));
+    if (!paths.length) return;
     const now = Date.now();
     if (this.lastConfigNotice && now - this.lastConfigNotice < 10000) return;
     this.lastConfigNotice = now;
@@ -1863,7 +1888,8 @@ class MarkportSyncSettingTab extends obsidian.PluginSettingTab {
           'settings, hotkeys, themes, snippets, and the community plugins with their settings. ' +
           'Only for a server vault synced into this whole vault. Checked on every full comparison, not live. ');
         f.appendText('The first time, this device\'s copy wins wherever they differ (the server\'s goes into its .trash). ' +
-          'The window layout and Markport Sync\'s own sign-in stay on each device. Reload Obsidian to use what arrives.');
+          'The window layout and Markport Sync\'s own sign-in stay on each device. Reload Obsidian to use what arrives. ');
+        f.appendText('The image library (Markport Clipper: tags, notes, folder folds, favorites) syncs either way.');
         if (!whole) { f.createEl('br'); f.appendText('Link a server vault with an empty folder first.'); }
       }))
       .addToggle((tg) => tg.setValue(!!s.syncConfig).setDisabled(!whole).onChange(async (on) => {
@@ -1933,7 +1959,7 @@ module.exports = MarkportSyncPlugin;
 module.exports.helpers = {
   normalizeServerUrl, normalizeFolder, isHidden, toLocal, toRel, under, foldersOverlap, shareTarget,
   sameStat, decide, conflictPath, trashPath, sameBytes, diffHunks, merge3, vaultName,
-  configSynced, communityForServer, communityForHere, sameIdLists,
+  configSynced, ALWAYS_CONFIG, communityForServer, communityForHere, sameIdLists,
 };
 module.exports.LinkSync = LinkSync;
 module.exports.HttpError = HttpError;

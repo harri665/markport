@@ -21,10 +21,10 @@ const WEB_IMAGE = ['png', 'apng', 'jpg', 'jpeg', 'jfif', 'pjpeg', 'pjp', 'gif', 
 
 // Formats the plugin can decode itself for display (no server needed).
 const RAW_CAMERA = ['dng', 'cr2', 'cr3', 'crw', 'nef', 'nrw', 'arw', 'srf', 'sr2', 'orf', 'rw2', 'raf', 'pef', 'srw', 'x3f', '3fr', 'erf', 'kdc', 'mos', 'mrw', 'iiq', 'rwl', 'dcr'];
-const LOCAL_DECODE = ['psd', 'psb', 'tif', 'tiff', 'tga', 'icb', 'vda', 'vst', 'qoi', 'kra', 'ora', 'procreate'].concat(RAW_CAMERA);
+const LOCAL_DECODE = ['psd', 'psb', 'tif', 'tiff', 'tga', 'icb', 'vda', 'vst', 'qoi', 'kra', 'ora', 'procreate', 'heic', 'heif', 'hif'].concat(RAW_CAMERA);
 
 // Formats only the server can turn into something viewable (sharp/libvips, ImageMagick).
-const SERVER_IMAGE = ['heic', 'heif', 'hif', 'jxl', 'jp2', 'j2k', 'j2c', 'jpf', 'jpx', 'jpm', 'exr', 'hdr', 'pic', 'dds', 'xcf', 'pcx',
+const SERVER_IMAGE = ['jxl', 'jp2', 'j2k', 'j2c', 'jpf', 'jpx', 'jpm', 'exr', 'hdr', 'pic', 'dds', 'xcf', 'pcx',
   'ppm', 'pgm', 'pbm', 'pnm', 'pfm', 'pam', 'sgi', 'rgb', 'rgba', 'bw', 'ras', 'sun', 'dpx', 'cin', 'fits', 'fit', 'fts', 'wbmp', 'xpm',
   'xbm', 'miff', 'mng', 'jng', 'otb', 'palm', 'pict', 'pct', 'icns', 'vtf', 'ktx', 'ktx2', 'wdp', 'jxr', 'hdp'];
 
@@ -289,6 +289,34 @@ function zipImage(ext, bytes, unzip) {
   return null;
 }
 
+// ── HEIC / HEIF (iPhone photos) ─────────────────────────────────────────────
+// lib: libheif-js (WebAssembly), passed in so this file stays dependency-free.
+// Decodes the primary image with its rotation/mirroring applied.
+// Resolves to { width, height, data: Uint8ClampedArray RGBA }.
+
+function isHeifBytes(b) {
+  // ISO BMFF: size(4) "ftyp" brand - heic heix hevc hevx heim heis mif1 msf1 avif ...
+  return b.length > 12 && b[4] === 0x66 && b[5] === 0x74 && b[6] === 0x79 && b[7] === 0x70;
+}
+
+function decodeHEIF(lib, input) {
+  const b = input instanceof Uint8Array ? input : new Uint8Array(input);
+  if (!isHeifBytes(b)) return Promise.reject(new Error('Not a HEIF file'));
+  const decoder = new lib.HeifDecoder();
+  const images = decoder.decode(b);
+  if (!images || !images.length) return Promise.reject(new Error('No image in this HEIC file'));
+  const image = images[0];
+  const width = image.get_width();
+  const height = image.get_height();
+  return new Promise((resolve, reject) => {
+    image.display({ data: new Uint8ClampedArray(width * height * 4), width, height }, (out) => {
+      for (const im of images) { try { if (im.free) im.free(); } catch (_) { /* already gone */ } }
+      if (!out) reject(new Error('Could not decode this HEIC file'));
+      else resolve({ width, height, data: out.data });
+    });
+  });
+}
+
 // ── PSD / PSB header (dimensions without decoding) ──────────────────────────
 
 function psdSize(input) {
@@ -301,5 +329,5 @@ function psdSize(input) {
 module.exports = {
   WEB_IMAGE, LOCAL_DECODE, SERVER_IMAGE, RAW_CAMERA, MODEL, MODEL_SIDECAR, FLIPBOOK_SUFFIX,
   extOf, kindOf, imageSupport, isFlipbookName, flipbookBase, sortFrames,
-  decodeTGA, decodeQOI, largestEmbeddedJpeg, zipImage, psdSize,
+  decodeTGA, decodeQOI, largestEmbeddedJpeg, zipImage, psdSize, isHeifBytes, decodeHEIF,
 };

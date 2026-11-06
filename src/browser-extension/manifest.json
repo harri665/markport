@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Markport Clipper",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Save images and screenshots from any web page into a folder of your Markport vault.",
   "background": { "service_worker": "background.js" },
   "action": {

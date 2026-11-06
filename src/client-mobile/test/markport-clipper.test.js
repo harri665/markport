@@ -237,6 +237,41 @@ test('media: numbered frames look like a flipbook; items quack like files', () =
   assert.equal(fb.frame(99).file, frames[1], 'clamped');
 });
 
+test('folder folds and favorites follow folder renames and go with deletes', () => {
+  const ui = { collapsed: ['Art', 'Art/Old', 'Artwork'], favorites: [{ kind: 'folder', value: 'Art/Old' }, { kind: 'tag', value: 'Art' }, { kind: 'folder', value: 'Artwork' }] };
+  assert.equal(H.renameUiPaths(ui, 'Art', 'Refs'), true);
+  assert.deepEqual(ui.collapsed, ['Refs', 'Refs/Old', 'Artwork'], 'a name prefix is not a parent');
+  assert.deepEqual(ui.favorites.map((f) => f.value), ['Refs/Old', 'Art', 'Artwork'], 'tags are not paths');
+  assert.equal(H.renameUiPaths(ui, 'Nope', 'X'), false);
+  assert.equal(H.dropUiPaths(ui, 'Refs'), true);
+  assert.deepEqual(ui.collapsed, ['Artwork']);
+  assert.deepEqual(ui.favorites.map((f) => f.value), ['Art', 'Artwork']);
+  assert.equal(H.dropUiPaths(ui, 'Refs'), false);
+});
+
+test('settings: data.json gets what devices share, local storage what one device keeps', () => {
+  const settings = {
+    targetFolder: 'Clips', pairingKey: 'k1', library: { 'a.png': { tags: ['x'] } },
+    libraryUi: { collapsed: ['Art'], favorites: [{ kind: 'folder', value: 'Art' }], sideMin: true, gridW: 400, boards: ['B.canvas'], sort: 'name' },
+  };
+  const shared = H.sharedSettings(settings);
+  assert.equal(shared.pairingKey, undefined, 'the desktop pairing key stays on its device');
+  assert.deepEqual(Object.keys(shared.libraryUi).sort(), ['collapsed', 'favorites', 'sort']);
+  assert.deepEqual(shared.library, settings.library);
+  assert.equal(settings.libraryUi.sideMin, true, 'the live settings are not changed');
+  const device = H.deviceSettings(settings);
+  assert.deepEqual(device, { ui: { sideMin: true, gridW: 400, boards: ['B.canvas'] }, pairingKey: 'k1' });
+
+  // Another device's data.json arrives: its folds and favorites, this device's layout and key.
+  const theirs = { targetFolder: 'Clips', pairingKey: 'other', library: {}, libraryUi: { collapsed: [], favorites: [], sideMin: false, sort: 'added' } };
+  const merged = H.mergeSettings({ showNotice: true }, theirs, device);
+  assert.equal(merged.pairingKey, 'k1');
+  assert.equal(merged.showNotice, true);
+  assert.deepEqual(merged.libraryUi, { collapsed: [], favorites: [], sideMin: true, sort: 'added', gridW: 400, boards: ['B.canvas'] });
+  // A device without its own storage yet keeps using what data.json had.
+  assert.equal(H.mergeSettings({}, theirs, null).pairingKey, 'other');
+});
+
 test('library metadata follows renames of files and folders, and goes on delete', () => {
   const lib = { 'A/x.png': { tags: ['t'] }, 'A/B/y.png': { note: 'n' }, 'AB/z.png': { note: 'keep' } };
   assert.equal(H.renameLibraryKeys(lib, 'A', 'C'), true);

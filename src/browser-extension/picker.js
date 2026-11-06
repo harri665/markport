@@ -409,9 +409,12 @@
       for (const v of t.vaults) {
         const group = el('optgroup');
         group.label = v.label;
-        const folders = v.folders.includes(v.target) ? v.folders : v.folders.concat([v.target]);
+        // Favorites (starred in the image library) first, marked with a star.
+        const favs = (v.favorites || []).filter((f) => v.folders.includes(f));
+        const rest = v.folders.includes(v.target) ? v.folders : v.folders.concat([v.target]);
+        const folders = favs.concat(rest.filter((f) => !favs.includes(f)));
         for (const f of folders) {
-          const o = el('option', null, f || 'Vault root');
+          const o = el('option', null, (favs.includes(f) ? '★ ' : '') + (f || 'Vault root'));
           o.value = JSON.stringify([v.id, f]);
           if (v.id === t.selected && f === v.target) o.selected = true;
           group.appendChild(o);

@@ -281,7 +281,7 @@ async function resolveVault(id) {
 }
 
 function describe(v) {
-  return { id: v.id, label: v.label, target: v.info.target, folders: v.info.folders };
+  return { id: v.id, label: v.label, target: v.info.target, folders: v.info.folders, favorites: v.info.favorites || [] };
 }
 
 // -- Getting the image bytes -------------------------------------------------

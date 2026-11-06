@@ -101,6 +101,31 @@ test('thumb: TGA goes through the JS decoder; unreadable files fail fast and sta
   assert.equal(outside.status, 400, 'no path escapes the vault');
 });
 
+test('thumb: real HEIC (HEVC) via libheif, rotation applied; a JPEG named .heic still works', async (t) => {
+  const s = await setup(t);
+  const fx = path.join(__dirname, 'fixtures');
+  await fsp.copyFile(path.join(fx, 'two-tone.heic'), path.join(s.vaultPath, 'Ref', 'photo.heic'));
+  await fsp.copyFile(path.join(fx, 'rotated.heic'), path.join(s.vaultPath, 'Ref', 'portrait.HEIC'));
+  await fsp.writeFile(path.join(s.vaultPath, 'Ref', 'converted.heic'), await testPng(80, 40).then((png) => sharp(png).jpeg().toBuffer()));
+
+  const thumb = async (name) => {
+    const r = await fetch(s.base + '/api/media/thumb?' + q({ vault: s.id, path: 'Ref/' + name, w: 256 }));
+    assert.equal(r.status, 200, name + ': ' + (r.status !== 200 ? await r.text() : ''));
+    return sharp(Buffer.from(await r.arrayBuffer())).raw().toBuffer({ resolveWithObject: true });
+  };
+  const a = await thumb('photo.heic');
+  assert.deepEqual([a.info.width, a.info.height], [96, 64]);
+  assert.ok(a.data[0] > 150 && a.data[2] < 120, 'left is red');
+  const right = (a.info.width - 1) * a.info.channels;
+  assert.ok(a.data[right + 2] > 150 && a.data[right] < 120, 'right is blue');
+
+  const b = await thumb('portrait.HEIC');
+  assert.deepEqual([b.info.width, b.info.height], [64, 96], 'turned upright, as the phone shot it');
+
+  const c = await thumb('converted.heic');
+  assert.deepEqual([c.info.width, c.info.height], [80, 40], 'JPEG content with a .heic name');
+});
+
 test('/api/fs/read streams binaries with Range and ETag', async (t) => {
   const s = await setup(t);
   const bytes = Buffer.from(Array.from({ length: 1000 }, (_, i) => i & 255));

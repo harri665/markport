@@ -20,7 +20,8 @@ test('kinds: images by how they can be shown, models, flipbook folders', () => {
   assert.equal(F.kindOf('Pyramid.mtl'), '', 'sidecars are not items');
   assert.equal(F.imageSupport('webp'), 'web');
   assert.equal(F.imageSupport('psd'), 'local');
-  assert.equal(F.imageSupport('heic'), 'server');
+  assert.equal(F.imageSupport('heic'), 'local', 'decoded in the plugin (libheif), no server needed');
+  assert.equal(F.imageSupport('jxl'), 'server');
   assert.equal(F.extOf('a/b.c/d'), '', 'a dot in a folder name is not an extension');
   assert.equal(F.isFlipbookName('Walk.flipbook'), true);
   assert.equal(F.isFlipbookName('.flipbook'), false);
@@ -94,4 +95,23 @@ test('zipImage and psdSize', () => {
   psd.writeUInt32BE(500, 18);
   assert.deepEqual(F.psdSize(psd), { height: 300, width: 500 });
   assert.equal(F.psdSize(Buffer.alloc(26)), null);
+});
+
+test('decodeHEIF: real HEIC (HEVC) through libheif, rotation applied; non-HEIF bytes refused', async () => {
+  const fs = require('fs');
+  const lib = (() => {
+    const m = { exports: {} };
+    const code = fs.readFileSync(path.join(__dirname, '..', '..', 'plugins', 'markport-clipper', 'vendor-heif.js'), 'utf8');
+    // As the plugin's loadVendor does (plus Node's require, which Electron has globally).
+    new Function('module', 'exports', '__dirname', '__filename', 'require', code)(m, m.exports, '/', '/vendor-heif.js', require);
+    return typeof m.exports === 'function' ? m.exports() : m.exports;
+  })();
+  const fx = path.join(__dirname, '..', '..', 'runtime-server', 'server', 'test', 'fixtures');
+  const a = await F.decodeHEIF(lib, fs.readFileSync(path.join(fx, 'two-tone.heic')));
+  assert.deepEqual([a.width, a.height], [96, 64]);
+  assert.ok(a.data[0] > 150 && a.data[2] < 120, 'left is red');
+  const b = await F.decodeHEIF(lib, fs.readFileSync(path.join(fx, 'rotated.heic')));
+  assert.deepEqual([b.width, b.height], [64, 96], 'upright, as the phone shot it');
+  assert.equal(F.isHeifBytes(Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 16, 74, 70, 73, 70, 0, 1, 1])), false, 'a JPEG named .heic');
+  await assert.rejects(F.decodeHEIF(lib, Buffer.from('not an image at all')), /Not a HEIF/);
 });
