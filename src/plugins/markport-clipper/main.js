@@ -1939,13 +1939,17 @@ const VENDOR = {
 // Used until media-formats.js has loaded (and if it cannot be).
 const FALLBACK_FORMATS = {
   extOf: (n) => { const s = String(n || ''); const i = s.lastIndexOf('.'); return i > 0 ? s.slice(i + 1).toLowerCase() : ''; },
-  kindOf: (n) => (IMAGE_EXTS.has(FALLBACK_FORMATS.extOf(String(n).includes('.') ? n : '.' + n)) ? 'image' : ''),
+  kindOf: (n) => {
+    const e = FALLBACK_FORMATS.extOf(String(n).includes('.') ? n : '.' + n);
+    return IMAGE_EXTS.has(e) ? 'image' : ['glb', 'gltf', 'obj', 'fbx', 'stl', 'ply', '3mf', 'dae', 'usdz'].includes(e) ? 'model' : '';
+  },
   imageSupport: (e) => (IMAGE_EXTS.has(String(e).toLowerCase()) && !['tiff', 'heic', 'heif'].includes(String(e).toLowerCase()) ? 'web' : ''),
   isFlipbookName: (n) => /\.flipbook$/i.test(String(n || '')),
   flipbookBase: (n) => String(n || '').replace(/\.flipbook$/i, ''),
   sortFrames: (a) => a.slice().sort((x, y) => x.localeCompare(y, undefined, { numeric: true, sensitivity: 'base' })),
   MODEL_SIDECAR: ['mtl', 'bin'],
   RAW_CAMERA: [],
+  FLIPBOOK_SUFFIX: '.flipbook',
 };
 
 class MediaItem {
@@ -2115,6 +2119,7 @@ class MediaLibrary {
       this.F = await this.loadVendor(VENDOR.formats);
     } catch (e) {
       console.warn('[markport-clipper] media-formats.js did not load; only browser image formats will show', e);
+      new obsidian.Notice('Image library: media-formats.js is missing from the plugin folder, so PSD, RAW and other formats will not show. Copy the whole plugin folder (npm run clipper).', 12000);
     }
     if (this.plugin.isMarkport()) {
       const m = /\/vault\/([^/?#]+)/.exec(window.location.pathname);
@@ -4987,6 +4992,12 @@ class MarkportClipperPlugin extends obsidian.Plugin {
       if (o.flipbook) {
         const name = sanitizeName(o.name || '') || 'Flipbook';
         target = uniquePath(folder, name + F.FLIPBOOK_SUFFIX, exists);
+        await vault.createFolder(target);
+      } else if (hasModel && accepted.length > 1 && accepted.some((f) => exists(joinPath(folder, f.name)))) {
+        // A model finds its .mtl and textures by name: renaming one to dodge
+        // a clash would break it. Put the whole set in its own folder instead.
+        const model = accepted.find((f) => kind(f) === 'model');
+        target = uniquePath(folder, sanitizeName(model.name.replace(/\.[^.]+$/, '')) || 'Model', exists);
         await vault.createFolder(target);
       }
       const total = accepted.reduce((n, f) => n + f.size, 0);

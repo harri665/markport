@@ -13,7 +13,8 @@
  *
  * Run it after `git pull`, on each computer. Vaults come from desktop
  * Obsidian's own list (obsidian.json), so there is nothing to configure.
- * Only a plugin's code is copied (manifest.json, main.js, styles.css);
+ * Only a plugin's code is copied (every file at the top of its folder:
+ * manifest.json, main.js, styles.css, the clipper's libraries);
  * data.json - its settings: the clipper's pairing key and image library,
  * Markport Sync's server, sign-in and links - is never touched. A vault that is synced between computers (NextCloud, Obsidian
  * Sync...) gets the update on the others through that sync, so running this
@@ -39,7 +40,11 @@ const PLUGINS = [
   { id: 'markport-clipper', name: 'Markport Clipper', dir: path.join(ROOT, 'src', 'plugins', 'markport-clipper') },
   { id: 'markport-sync', name: 'Markport Sync', dir: path.join(ROOT, 'src', 'native-plugins', 'markport-sync') },
 ];
-const CODE_FILES = ['manifest.json', 'main.js', 'styles.css'];
+// A plugin's code: every file at the top of its folder (main.js, styles.css,
+// manifest.json, and the clipper's media-formats.js and vendor-*.js
+// libraries), but never data.json - its settings - or READMEs. The same set Markport
+// seeds into in-browser vaults (api/system-plugin-files.js).
+const NOT_CODE = new Set(['data.json']);
 const EXTENSION_DIR = path.join(ROOT, 'src', 'browser-extension');
 const IS_WIN = process.platform === 'win32';
 
@@ -98,7 +103,8 @@ function findVault(arg, vaults) {
 // ── The plugin ──────────────────────────────────────────────────────────────
 
 const pluginDest = (vault, plugin) => path.join(vault.path, '.obsidian', 'plugins', plugin.id);
-const codeFiles = (plugin) => CODE_FILES.filter((f) => fs.existsSync(path.join(plugin.dir, f)));
+const codeFiles = (plugin) => fs.readdirSync(plugin.dir).filter((f) => !NOT_CODE.has(f) && !f.startsWith('.') && !/\.md$/i.test(f)
+  && fs.statSync(path.join(plugin.dir, f)).isFile());
 
 function syncPlugin(vault, plugin, dryRun) {
   const dest = pluginDest(vault, plugin);

@@ -1,9 +1,9 @@
 {
   "id": "markport-clipper",
   "name": "Markport - Image Clipper",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "minAppVersion": "1.0.0",
-  "description": "An image library and reference boards for your vault (folders, tags, smart folders, masonry grid, details, full screen; boards are .canvas files you can pin over other apps), plus saving images and screenshots from any web page with the Markport Clipper browser extension (src/browser-extension).",
+  "description": "An image library and reference boards for your vault (folders, tags, smart folders, masonry grid, details, full screen; 3D models with a live viewer, flipbooks, PSD/TIFF/RAW and more; boards are .canvas files you can pin over other apps), plus saving images and screenshots from any web page with the Markport Clipper browser extension (src/browser-extension).",
   "author": "Markport",
   "isDesktopOnly": false
 }
