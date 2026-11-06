@@ -156,7 +156,9 @@ function tryGetSystemFilePath(relPath) {
 function mergeCommunityList(arr) {
   const base = Array.isArray(arr) ? arr.filter((x) => typeof x === 'string') : [];
   const set = new Set(base);
-  for (const id of SYSTEM_PLUGIN_DIRS.keys()) set.add(id);
+  // Sorted, not scan order: src/plugins and vendor/plugins are scanned in
+  // turn, so scan order would depend on which folder a plugin came from.
+  for (const id of getSystemPluginIds()) set.add(id);
   return Array.from(set);
 }
 

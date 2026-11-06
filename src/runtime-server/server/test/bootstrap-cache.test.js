@@ -166,7 +166,12 @@ test('bootstrap merges system plugin ids into an existing community-plugins.json
     // loading it costs no round-trip.
     const manifest = body.fs['.obsidian/plugins/' + id + '/manifest.json'].content;
     assert.equal(JSON.parse(manifest).id, id);
-    assert.equal(typeof body.fs['.obsidian/plugins/' + id + '/main.js'].content, 'string', id + ' main.js content');
+    // ...unless it is over the per-file content limit (500 KB by default):
+    // a large main.js, such as a locally installed obsidian-livesync's, is
+    // listed stat only and read through /api/fs/read.
+    const mainJs = body.fs['.obsidian/plugins/' + id + '/main.js'];
+    assert.ok(mainJs, id + ' main.js should be listed');
+    if (mainJs.size <= 500 * 1024) assert.equal(typeof mainJs.content, 'string', id + ' main.js content');
   }
 });
 
