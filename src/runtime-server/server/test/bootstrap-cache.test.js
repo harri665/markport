@@ -162,8 +162,113 @@ test('bootstrap merges system plugin ids into an existing community-plugins.json
     assert.ok(listed.includes(id), id + ' should be listed in .obsidian/plugins');
     const files = (body.dirs['.obsidian/plugins/' + id] || []).map((e) => e.name);
     assert.ok(files.includes('manifest.json'), id + ' should list its manifest.json');
-    assert.equal(body.fs['.obsidian/plugins/' + id + '/manifest.json'].content, undefined, 'stats only: reads go to /api/fs/read');
+    // What Obsidian reads to load the plugin comes with the response, so
+    // loading it costs no round-trip.
+    const manifest = body.fs['.obsidian/plugins/' + id + '/manifest.json'].content;
+    assert.equal(JSON.parse(manifest).id, id);
+    assert.equal(typeof body.fs['.obsidian/plugins/' + id + '/main.js'].content, 'string', id + ' main.js content');
   }
+});
+
+async function openVault(server, vaultPath) {
+  const openRes = await fetch(server.baseUrl + '/api/vaults/open', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path: vaultPath, create: false }),
+  });
+  const { id } = await openRes.json();
+  serverCache.delete(id);
+  return id;
+}
+
+test('a vault plugin folder holding only data.json still gets the system plugin files', async (t) => {
+  const tmp = await fsp.mkdtemp(path.join(os.tmpdir(), 'obsidian-web-bootstrap-'));
+  t.after(() => fsp.rm(tmp, { recursive: true, force: true }));
+  const vaultPath = await makeVaultFixture(tmp);
+
+  const systemPlugins = require('../system-plugins');
+  systemPlugins.init();
+  const id = systemPlugins.getSystemPluginIds()[0];
+  // Obsidian creates the folder the first time the plugin saves settings.
+  const own = path.join(vaultPath, '.obsidian', 'plugins', id);
+  await fsp.mkdir(own, { recursive: true });
+  await fsp.writeFile(path.join(own, 'data.json'), '{"mine":true}');
+
+  const server = await startTestServer({
+    clientPath: path.join(tmp, 'client'),
+    obsidianPath: path.join(tmp, 'obsidian'),
+    registryPath: path.join(tmp, 'vaults.json'),
+    vaultPath,
+  });
+  t.after(server.close);
+  const vaultId = await openVault(server, vaultPath);
+
+  const body = await (await fetch(`${server.baseUrl}/api/bootstrap?vault=${vaultId}`)).json();
+  const rel = '.obsidian/plugins/' + id;
+  const names = body.dirs[rel].map((e) => e.name);
+  assert.ok(names.includes('data.json'), 'the vault file stays listed');
+  assert.ok(names.includes('manifest.json'), 'the system files are merged in');
+  assert.equal(body.fs[rel + '/data.json'].content, '{"mine":true}', 'the vault copy wins');
+  const viaFs = await (await fetch(`${server.baseUrl}/api/fs/read?vault=${vaultId}&path=${rel}/manifest.json&encoding=utf8`)).text();
+  assert.equal(body.fs[rel + '/manifest.json'].content, viaFs, 'bootstrap and /api/fs/read must agree');
+});
+
+test('community-plugins.json is in the response even when the vault has none, as /api/fs/read answers', async (t) => {
+  const tmp = await fsp.mkdtemp(path.join(os.tmpdir(), 'obsidian-web-bootstrap-'));
+  t.after(() => fsp.rm(tmp, { recursive: true, force: true }));
+  const vaultPath = await makeVaultFixture(tmp);
+  const systemPlugins = require('../system-plugins');
+  systemPlugins.init();
+
+  const server = await startTestServer({
+    clientPath: path.join(tmp, 'client'),
+    obsidianPath: path.join(tmp, 'obsidian'),
+    registryPath: path.join(tmp, 'vaults.json'),
+    vaultPath,
+  });
+  t.after(server.close);
+  const vaultId = await openVault(server, vaultPath);
+
+  const body = await (await fetch(`${server.baseUrl}/api/bootstrap?vault=${vaultId}`)).json();
+  const viaFs = await (await fetch(`${server.baseUrl}/api/fs/read?vault=${vaultId}&path=.obsidian/community-plugins.json&encoding=utf8`)).text();
+  assert.deepEqual(JSON.parse(body.fs['.obsidian/community-plugins.json'].content), JSON.parse(viaFs));
+
+  // The system plugin folders listed above are not on disk. That is not a
+  // change, so the next request reuses the entry instead of rescanning.
+  const first = serverCache.get(vaultId);
+  await fetch(`${server.baseUrl}/api/bootstrap?vault=${vaultId}`);
+  assert.equal(serverCache.get(vaultId), first, 'cache HIT for a vault with no plugin folders of its own');
+});
+
+test('a cached response is rebuilt when a system plugin file changes', async (t) => {
+  const tmp = await fsp.mkdtemp(path.join(os.tmpdir(), 'obsidian-web-bootstrap-'));
+  t.after(() => fsp.rm(tmp, { recursive: true, force: true }));
+  const vaultPath = await makeVaultFixture(tmp);
+  const systemPlugins = require('../system-plugins');
+  systemPlugins.init();
+  const ids = systemPlugins.getSystemPluginIds();
+  const id = ids.includes('obsidian-web-layout') ? 'obsidian-web-layout' : ids[0];
+  const mainJs = path.join(systemPlugins.getSystemPluginDir(id), 'main.js');
+
+  const server = await startTestServer({
+    clientPath: path.join(tmp, 'client'),
+    obsidianPath: path.join(tmp, 'obsidian'),
+    registryPath: path.join(tmp, 'vaults.json'),
+    vaultPath,
+  });
+  t.after(server.close);
+  const vaultId = await openVault(server, vaultPath);
+
+  await fetch(`${server.baseUrl}/api/bootstrap?vault=${vaultId}`);
+  const first = serverCache.get(vaultId);
+  assert.ok(first, 'first request fills the cache');
+  // Touch the plugin's main.js (mtime only - the repo file is not changed).
+  const st = await fsp.stat(mainJs);
+  t.after(() => fsp.utimes(mainJs, st.atime, st.mtime));
+  await fsp.utimes(mainJs, new Date(), new Date(st.mtimeMs + 5000));
+
+  await fetch(`${server.baseUrl}/api/bootstrap?vault=${vaultId}`);
+  assert.notEqual(serverCache.get(vaultId), first, 'the entry is rebuilt, not reused');
 });
 
 test('BOOTSTRAP_DISABLED=true returns {disabled:true} without scanning', async (t) => {
@@ -305,7 +410,8 @@ test('maxTotalMB caps total response: response carries {capped:true} and partial
   assert.equal(noteEntries.length, 16, 'all 16 notes should appear in dirs');
 
   // Some files have content, others don't (skipped due to budget).
-  const withContent = Object.values(body.fs).filter((v) => typeof v.content === 'string').length;
+  const withContent = Object.entries(body.fs)
+    .filter(([k, v]) => /^note-\d+\.md$/.test(k) && typeof v.content === 'string').length;
   const totalFs = Object.keys(body.fs).length;
   assert.ok(withContent < 16, `expected fewer than 16 files with content, got ${withContent}`);
   assert.ok(withContent > 0, 'expected at least one file with content before cap hit');

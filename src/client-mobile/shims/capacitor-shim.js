@@ -155,6 +155,18 @@
     return e;
   }
 
+  // A file the bootstrap listing proves absent (bootstrap-lookup.js
+  // lookupMissing) is answered here, without the 404 round-trip. Same code
+  // and message shape as the server's ENOENT.
+  function bootstrapSaysMissing(p) {
+    const lookup = window.__owBootstrapLookup;
+    return !!(lookup && lookup.lookupMissing && lookup.lookupMissing(window.__owBootstrapCache, p));
+  }
+
+  function missingError(syscall, p) {
+    return capError('ENOENT', 'ENOENT: no such file or directory, ' + syscall + " '" + p + "'");
+  }
+
   // ── opfs-ux: native vault-chooser bridge helpers ────────────────────────
   // The native `.mobile-vault-chooser-screen` (obsidian-mobile/app.js) both
   // (a) validates every entry of its vault list via Filesystem.stat(id) —
@@ -265,6 +277,7 @@
         if (hit !== null && hit !== undefined) {
           return { data: hit };
         }
+        if (bootstrapSaysMissing(p)) throw missingError('open', p);
       }
 
       const url = '/api/fs/read?' + vaultQuery() + 'path=' + encodePath(p) +
@@ -443,6 +456,7 @@
       if (window.__owBootstrapLookup) {
         const hit = window.__owBootstrapLookup.lookupStat(window.__owBootstrapCache, p);
         if (hit) return hit;
+        if (bootstrapSaysMissing(p)) throw missingError('stat', p);
       }
 
       const res = await fetch('/api/fs/stat?' + vaultQuery() + 'path=' + encodePath(p));

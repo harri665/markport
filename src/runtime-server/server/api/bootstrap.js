@@ -263,31 +263,42 @@ async function walkDir(dir, root, fsCache, dirsCache, walkHidden = false, progre
  * holds that file (Obsidian writes it, with system ids stripped, on first
  * open) loads no system plugin on any later open.
  */
-function applySystemPluginOverlay(fsCache, dirsCache) {
+function applySystemPluginOverlay(fsCache, dirsCache, budget = null) {
   const rel = '.obsidian/community-plugins.json';
   const entry = fsCache[rel];
-  if (entry && typeof entry.content === 'string') {
+  // /api/fs/read answers with the system ids whether or not the vault has the
+  // file, so this response must hold it either way: the client treats a file
+  // its cached listing lacks as missing, without asking the server.
+  if (!entry || typeof entry.content === 'string') {
     let list = [];
     try {
-      const parsed = JSON.parse(entry.content);
+      const parsed = entry ? JSON.parse(entry.content) : [];
       if (Array.isArray(parsed)) list = parsed;
     } catch (_) { /* malformed: start from empty, as /api/fs/read does */ }
     const content = JSON.stringify(mergeCommunityList(list));
-    fsCache[rel] = { ...entry, content, size: Buffer.byteLength(content) };
+    fsCache[rel] = { mtime: Date.now(), isFile: true, ...entry, content, size: Buffer.byteLength(content) };
   }
-  if (dirsCache) addSystemPluginDirs(fsCache, dirsCache);
+  if (dirsCache) addSystemPluginDirs(fsCache, dirsCache, budget);
 }
+
+// The files Obsidian itself reads to load a plugin. Their content goes in the
+// response, so loading a system plugin costs no round-trip. Anything else in
+// the folder (a plugin's own lazily loaded libraries) is listed, stat only,
+// and read from /api/fs/read when the plugin asks for it.
+const PLUGIN_LOAD_FILES = new Set(['manifest.json', 'main.js', 'styles.css']);
 
 /**
  * The plugin folders themselves, too. Obsidian finds plugins by listing
  * .obsidian/plugins, and the client answers that listing from this response,
  * so a system plugin missing here is never loaded, even though it is enabled
- * (the overlay above) and /api/fs/readdir would list it. Only stats go in:
- * no content, so reads fall through to /api/fs/read, which serves the files
- * from src/plugins/. A vault's own copy of a plugin folder wins, as it does
- * in /api/fs.
+ * (the overlay above) and /api/fs/readdir would list it.
+ *
+ * Merged file by file, as /api/fs/read and /stat do: a file the vault's own
+ * plugin folder has wins, the rest come from src/plugins/. A vault folder
+ * holding only the plugin's data.json is the usual case - Obsidian creates it
+ * the first time the plugin saves its settings.
  */
-function addSystemPluginDirs(fsCache, dirsCache) {
+function addSystemPluginDirs(fsCache, dirsCache, budget = null) {
   const now = Date.now();
   const dirEntry = (name, mtime) => ({ name, isFile: false, isDirectory: true, isSymbolicLink: false, mtime, size: 0 });
   const ensureChild = (parent, name) => {
@@ -296,25 +307,72 @@ function addSystemPluginDirs(fsCache, dirsCache) {
   };
   for (const id of getSystemPluginIds()) {
     const rel = '.obsidian/plugins/' + id;
-    if (dirsCache[rel]) continue;
     const dir = getSystemPluginDir(id);
     let names;
     try { names = fs.readdirSync(dir); } catch (_) { continue; }
-    const entries = [];
+    const entries = dirsCache[rel] ? dirsCache[rel].slice() : [];
     for (const name of names) {
+      if (entries.some((e) => e.name === name)) continue;   // the vault's copy wins
+      const abs = path.join(dir, name);
       let st;
-      try { st = fs.statSync(path.join(dir, name)); } catch (_) { continue; }
+      try { st = fs.statSync(abs); } catch (_) { continue; }
       if (!st.isFile()) continue;
       entries.push({ name, isFile: true, isDirectory: false, isSymbolicLink: false, mtime: st.mtimeMs, size: st.size });
-      fsCache[rel + '/' + name] = { mtime: st.mtimeMs, size: st.size, isFile: true };
+      const entry = { mtime: st.mtimeMs, size: st.size, isFile: true };
+      if (PLUGIN_LOAD_FILES.has(name) && st.size <= currentLimits.maxContentBytes) {
+        if (budget && budget.remaining < st.size) {
+          budget.capped = true;
+        } else {
+          try {
+            entry.content = fs.readFileSync(abs, 'utf8');
+            if (budget) budget.remaining -= st.size;
+          } catch (_) { /* stat only */ }
+        }
+      }
+      fsCache[rel + '/' + name] = entry;
     }
     if (!fsCache['.obsidian']) fsCache['.obsidian'] = { mtime: now, size: 0, isFile: false, isDirectory: true };
     if (!fsCache['.obsidian/plugins']) fsCache['.obsidian/plugins'] = { mtime: now, size: 0, isFile: false, isDirectory: true };
     ensureChild('', '.obsidian');
     ensureChild('.obsidian', 'plugins');
     ensureChild('.obsidian/plugins', id);
-    fsCache[rel] = { mtime: now, size: 0, isFile: false, isDirectory: true };
+    if (!fsCache[rel]) fsCache[rel] = { mtime: now, size: 0, isFile: false, isDirectory: true };
     dirsCache[rel] = entries;
+  }
+}
+
+/**
+ * Names, sizes and mtimes of every system plugin file. The cached response
+ * holds their content, and the vault's directory mtimes say nothing about
+ * src/plugins/, so a cached entry is reused only while this is unchanged -
+ * an edited plugin shows on the next reload, as it did when it was read from
+ * /api/fs/read every time.
+ */
+function systemPluginSignature() {
+  const parts = [];
+  for (const id of getSystemPluginIds()) {
+    const dir = getSystemPluginDir(id);
+    let names;
+    try { names = fs.readdirSync(dir).sort(); } catch (_) { continue; }
+    for (const name of names) {
+      try {
+        const st = fs.statSync(path.join(dir, name));
+        if (st.isFile()) parts.push(id + '/' + name + ':' + st.size + ':' + st.mtimeMs);
+      } catch (_) { /* gone between readdir and stat */ }
+    }
+  }
+  return parts.join('\n');
+}
+
+// Write out what /api/fs is still buffering under vaultRoot, so the scan
+// below reads current content. Required lazily: fs.js requires this module
+// lazily too.
+async function flushPendingWrites(vaultRoot) {
+  try {
+    const { flushPendingUnder } = require('./fs');
+    if (flushPendingUnder) await flushPendingUnder(path.resolve(vaultRoot));
+  } catch (err) {
+    console.warn('[bootstrap] could not flush pending writes:', err.message);
   }
 }
 
@@ -352,9 +410,14 @@ async function _buildCacheEntry(vaultId, vaultRoot, vaultRegistry, full = false)
   // ── Electron IPC values ────────────────────────────────────────────
   const electronValues = buildElectronValues(vaultId, vaultRegistry);
 
+  await flushPendingWrites(vaultRoot);
+  const pluginSig = systemPluginSignature();
+
   // ── Cache validation ───────────────────────────────────────────────
   const cached = serverCache.get(vaultId);
-  if (cached) {
+  if (cached && cached.pluginSig !== pluginSig) {
+    console.log(`[bootstrap] vault=${vaultId.slice(0, 8)}… cache MISS (system plugin files changed)`);
+  } else if (cached) {
     const changedDirs = [];
     await Promise.all(
       Object.entries(cached.dirMtimes).map(async ([relDir, oldMtime]) => {
@@ -365,7 +428,12 @@ async function _buildCacheEntry(vaultId, vaultRoot, vaultRegistry, full = false)
           const s = await fsp.stat(absDir);
           if (s.mtime.getTime() !== oldMtime) changedDirs.push(relDir);
         } catch (_) {
-          changedDirs.push(relDir); // dir deleted → invalidate
+          // Deleted → invalidate. A listing with mtime 0 never existed on
+          // disk - the system plugin folders addSystemPluginDirs adds - and
+          // still not existing is no change; counting it as one made every
+          // request for such a vault a full rescan. Creating it changes its
+          // parent's mtime, which is checked too.
+          if (oldMtime !== 0) changedDirs.push(relDir);
         }
       }),
     );
@@ -454,7 +522,7 @@ async function _buildCacheEntry(vaultId, vaultRoot, vaultRegistry, full = false)
     await walkDir(vaultRoot, vaultRoot, fsCache, dirsCache, false, progress, budget);
   }
 
-  applySystemPluginOverlay(fsCache, dirsCache);
+  applySystemPluginOverlay(fsCache, dirsCache, budget);
 
   setProgress(vaultId, { state: 'reading', label: 'Reading files...', pct: 80 });
   const fileCount = Object.keys(fsCache).length;
@@ -494,7 +562,7 @@ async function _buildCacheEntry(vaultId, vaultRoot, vaultRegistry, full = false)
   let compressed = {};
   try { compressed = await preCompress(jsonBuf); } catch (_) {}
 
-  const entry = { response, dirMtimes, compressed, isFull: full };
+  const entry = { response, dirMtimes, compressed, isFull: full, pluginSig };
   if (vaultId) serverCache.set(vaultId, entry);
   setProgress(vaultId, { state: 'ready', label: 'Ready', pct: 100 });
   // Clean up progress after a short delay so late pollers see "ready".

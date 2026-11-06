@@ -677,3 +677,7 @@ function createFsRouter(vaultRegistry, fallbackVaultRoot, hooks = {}) {
 }
 
 module.exports = createFsRouter;
+// /api/bootstrap reads the vault from disk, so it writes out what is still
+// buffered first; otherwise a reload within the coalesce window would see the
+// old content of a file, or no file at all.
+module.exports.flushPendingUnder = flushPendingUnder;

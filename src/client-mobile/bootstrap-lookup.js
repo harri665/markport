@@ -53,9 +53,35 @@
     });
   }
 
+  /**
+   * True when the cache proves `p` does not exist: its parent's listing is
+   * cached and has no entry by that name. Obsidian probes a dozen config
+   * files that a vault usually lacks (hotkeys.json, graph.json, ...), and
+   * each 404 was a round-trip made one after another during startup.
+   *
+   * Safe against changes made since the response was built: every write,
+   * delete and watch event drops the parent's listing (cache-invalidation.js),
+   * and with no listing this answers false. Names compare case-insensitively,
+   * so a file a case-insensitive server disk would still find is never
+   * reported missing.
+   */
+  function lookupMissing(cache, p) {
+    if (!cache || !cache.dirs || !cache.fs || !p) return false;
+    if (cache.fs[p]) return false;
+    const slash = p.lastIndexOf('/');
+    const entries = cache.dirs[slash === -1 ? '' : p.substring(0, slash)];
+    if (!entries) return false;
+    const name = (slash === -1 ? p : p.substring(slash + 1)).toLowerCase();
+    if (!name) return false;
+    for (let i = 0; i < entries.length; i++) {
+      if (String(entries[i].name).toLowerCase() === name) return false;
+    }
+    return true;
+  }
+
   if (typeof module !== 'undefined' && module.exports) {
-    module.exports = { lookupContent, lookupStat, lookupDir };
+    module.exports = { lookupContent, lookupStat, lookupDir, lookupMissing };
   } else if (typeof window !== 'undefined') {
-    window.__owBootstrapLookup = { lookupContent, lookupStat, lookupDir };
+    window.__owBootstrapLookup = { lookupContent, lookupStat, lookupDir, lookupMissing };
   }
 })();

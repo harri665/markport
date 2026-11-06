@@ -2,7 +2,47 @@
 
 const assert = require('assert/strict');
 const test = require('node:test');
-const { lookupContent, lookupStat, lookupDir } = require('../bootstrap-lookup');
+const { lookupContent, lookupStat, lookupDir, lookupMissing } = require('../bootstrap-lookup');
+const { invalidateCacheEntry } = require('../cache-invalidation');
+
+function configCache() {
+  return {
+    fs: {
+      '.obsidian/app.json': { content: '{}', size: 2, mtime: 1, isFile: true },
+      '.obsidian/community-plugins.json': { content: '[]', size: 2, mtime: 1, isFile: true },
+    },
+    dirs: {
+      '': [{ name: '.obsidian', isDirectory: true }, { name: 'Welcome.md', isFile: true }],
+      '.obsidian': [{ name: 'app.json', isFile: true }, { name: 'logo.png', isFile: true }],
+    },
+  };
+}
+
+test('lookupMissing: a name the cached parent listing lacks is missing', () => {
+  assert.equal(lookupMissing(configCache(), '.obsidian/hotkeys.json'), true);
+  assert.equal(lookupMissing(configCache(), 'Nope.md'), true);
+});
+
+test('lookupMissing: listed files, binary files and synthesized entries are not missing', () => {
+  const cache = configCache();
+  assert.equal(lookupMissing(cache, '.obsidian/app.json'), false);
+  assert.equal(lookupMissing(cache, '.obsidian/logo.png'), false, 'listed but no fs entry (binary)');
+  assert.equal(lookupMissing(cache, '.obsidian/community-plugins.json'), false, 'fs entry, not listed');
+  assert.equal(lookupMissing(cache, 'welcome.md'), false, 'case-insensitive match');
+});
+
+test('lookupMissing: no answer without the parent listing', () => {
+  assert.equal(lookupMissing(configCache(), 'folder/x.md'), false);
+  assert.equal(lookupMissing(configCache(), ''), false);
+  assert.equal(lookupMissing(null, '.obsidian/hotkeys.json'), false);
+  assert.equal(lookupMissing({}, '.obsidian/hotkeys.json'), false);
+});
+
+test('lookupMissing: a write since the response was built is never reported missing', () => {
+  const cache = configCache();
+  invalidateCacheEntry(cache, '.obsidian/hotkeys.json');   // what writeFile does
+  assert.equal(lookupMissing(cache, '.obsidian/hotkeys.json'), false);
+});
 
 test('lookupContent returns the cached text for a hit', () => {
   const cache = {
