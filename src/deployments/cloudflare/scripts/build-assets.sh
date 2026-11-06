@@ -17,7 +17,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CF_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 # MAIN_DIR is the repo root, three levels up from src/deployments/cloudflare/.
-MAIN_DIR="$(cd "$CF_DIR/../../.." && pwd)"
+# `pwd -W` (Git Bash / MSYS only) gives E:/src/... instead of /e/src/...: this
+# path is also handed to node, which on Windows reads /e/src as E:\e\src.
+MAIN_DIR="$(cd "$CF_DIR/../../.." && { pwd -W 2>/dev/null || pwd; })"
 PUBLIC_DIR="$MAIN_DIR/.tmp/deployments/cloudflare/public"
 
 echo "obsidian-web CF — building assets (mobile)"
@@ -150,7 +152,7 @@ CONFIG_PATH="$CONFIG_PATH" HTML_PATH="$PUBLIC_DIR/index.html" node -e '
 # reads it.
 echo "  building example-vault.json (static)..."
 echo 'export const PLUGIN_FILES = new Map();' > "$MAIN_DIR/src/deployments/cloudflare/plugins-generated.js"
-node -e "import('$MAIN_DIR/src/deployments/cloudflare/template.js').then(m=>{require('fs').writeFileSync('$PUBLIC_DIR/example-vault.json', JSON.stringify([...m.TEMPLATE_FILES]))})"
+node -e "import(require('url').pathToFileURL('$MAIN_DIR/src/deployments/cloudflare/template.js').href).then(m=>{require('fs').writeFileSync('$PUBLIC_DIR/example-vault.json', JSON.stringify([...m.TEMPLATE_FILES]))})"
 rm "$MAIN_DIR/src/deployments/cloudflare/plugins-generated.js"
 
 # ── client-only signals inject (docs/plans/client-only-resilience.md §3.2 +
