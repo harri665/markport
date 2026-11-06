@@ -118,12 +118,19 @@ should share the setup.
 - After that, a file changed on both sides keeps the newer copy; the other one goes into that
   side's trash (`.trash/` in the vault).
 - Not synced: `workspace.json` and `workspace-mobile.json` (each device's open tabs and
-  panes), Markport Sync's own folder (its server, sign-in and links belong to each device), and
-  the code of Markport's own plugins (Markport Clipper, Markport Share, the layout switcher),
-  which every Markport server serves itself. Their `data.json` is synced, so the clipper's image
-  library follows you.
-- Which plugins are on (`community-plugins.json`) is synced, except Markport's own plugins: the
-  server always has those on, so each device keeps its own choice for them.
+  panes), and Markport Sync's own folder (its server, sign-in and links belong to each device).
+- Markport's own plugins (Markport Clipper, Root Folder, Share, the layout switcher) are
+  installed from the server and kept at the server's version, so a new vault on a new device gets
+  them. This goes one way: every Markport server serves their code itself, so this device never
+  uploads it, and a file changed or deleted here is put back on the next comparison. Their
+  `data.json` syncs both ways like any other setting, so the clipper's image library follows you.
+  Share and the layout switcher only do something in Markport's web app; in Obsidian they stay idle.
+- A Markport plugin new to this device is turned on once. After that, on or off is each device's
+  choice: the server always has them on, so they are left out of the synced `community-plugins.json`.
+  Uninstalled here, one comes back on the next comparison, turned off.
+- Third-party plugins a server serves from `vendor/plugins` are not installed this way. Install
+  those yourself if you want them.
+- Which other plugins are on (`community-plugins.json`) is synced.
 - Obsidian reads most of these files when it starts. When settings or plugins arrive from the
   server, a notice says so: click it to reload Obsidian.
 

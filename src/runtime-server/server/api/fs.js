@@ -18,6 +18,7 @@ const {
   getSystemPluginDir,
   mergeCommunityList,
   stripCommunityList,
+  SYSTEM_PLUGINS_DIR,
 } = require('../system-plugins');
 
 // Imported lazily to avoid circular require — bootstrap.js exports serverCache.
@@ -32,6 +33,37 @@ function invalidateBootstrapCache(vaultId) {
 // the vault precedence over the repo copy.
 async function fileExists(absPath) {
   try { await fsp.access(absPath); return true; } catch { return false; }
+}
+
+// Every file of Markport's own plugins (src/plugins) as the overlay serves
+// it: { path: '.obsidian/plugins/<id>/<file>', mtime, size }. Leaves out
+// dotfiles and data.json (a plugin's settings live in the vault, not the
+// repo), and third-party plugins served from vendor/plugins: a device may
+// have its own copy of one of those from the community plugin store.
+async function listSystemPluginFiles() {
+  const out = [];
+  async function walk(abs, rel) {
+    const entries = await safeReaddir(abs);
+    for (const e of entries) {
+      if (e.name.startsWith('.')) continue;
+      const childAbs = path.join(abs, e.name);
+      const childRel = rel + '/' + e.name;
+      let st;
+      try { st = await fsp.stat(childAbs); } catch (_) { continue; }
+      if (st.isDirectory()) {
+        if (!e.isSymbolicLink()) await walk(childAbs, childRel);
+      } else if (st.isFile() && !/\/plugins\/[^/]+\/data\.json$/.test(childRel)) {
+        out.push({ path: childRel, mtime: st.mtime.getTime(), size: st.size });
+      }
+    }
+  }
+  for (const id of getSystemPluginIds()) {
+    const dir = getSystemPluginDir(id);
+    if (dir && path.resolve(dir).startsWith(path.resolve(SYSTEM_PLUGINS_DIR) + path.sep)) {
+      await walk(dir, '.obsidian/plugins/' + id);
+    }
+  }
+  return out;
 }
 
 // Like fsp.readdir(target, { withFileTypes: true }) but returns [] when
@@ -642,7 +674,10 @@ function createFsRouter(vaultRegistry, fallbackVaultRoot, hooks = {}) {
   // ?path=.obsidian lists the vault's settings and plugins as they are on
   // disk (markport-sync's "Sync settings and plugins"), without the system
   // plugin overlay. systemPlugins says which plugin ids are Markport's own,
-  // served to every vault from the repo, so a device leaves their code alone.
+  // served to every vault from the repo, so a device never uploads their
+  // code. systemFiles lists that code - the overlay's files that the vault
+  // doesn't have on disk, so exactly what /api/fs/read serves for those
+  // paths - so a native vault can install and update the plugins.
   router.get('/tree', async (req, res) => {
     try {
       const rel = String(req.query.path || '').replace(/^\/+|\/+$/g, '');
@@ -667,7 +702,13 @@ function createFsRouter(vaultRegistry, fallbackVaultRoot, hooks = {}) {
         }));
       }
       await walk(root, rel);
-      res.json({ files, dirs, systemPlugins: getSystemPluginIds() });
+      const out = { files, dirs, systemPlugins: getSystemPluginIds() };
+      if (rel === '.obsidian' || rel.startsWith('.obsidian/')) {
+        const onDisk = new Set(files.map((f) => f.path));
+        out.systemFiles = (await listSystemPluginFiles())
+          .filter((f) => (f.path === rel || f.path.startsWith(rel + '/')) && !onDisk.has(f.path));
+      }
+      res.json(out);
     } catch (err) {
       handleError(res, err);
     }

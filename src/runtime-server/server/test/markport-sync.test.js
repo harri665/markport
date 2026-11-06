@@ -224,6 +224,10 @@ test('paths: folders, links that overlap, conflict names', () => {
 
 // ── end to end ──────────────────────────────────────────────────────────────
 
+// The system plugins the server serves to every vault.
+const repoPluginsDir = path.resolve(__dirname, '..', '..', '..', 'plugins');
+const repoPlugin = (rel) => fsp.readFile(path.join(repoPluginsDir, rel), 'utf8');
+
 async function waitFor(cond, ms = 5000) {
   const end = Date.now() + ms;
   for (;;) {
@@ -236,6 +240,7 @@ async function waitFor(cond, ms = 5000) {
 async function setup(t, opts = {}) {
   const folder = opts.folder === undefined ? 'Server' : opts.folder;
   const tmp = await fsp.mkdtemp(path.join(os.tmpdir(), 'markport-sync-plugin-'));
+  require('../system-plugins').init();   // as the server's start does
   const app = createApp({
     registryPath: path.join(tmp, 'registry.json'),
     vaultPath: path.join(tmp, 'default'),
@@ -267,7 +272,7 @@ async function setup(t, opts = {}) {
   const vault = fakeVault();
   for (const [p, text] of Object.entries(opts.localConfig || {})) await vault._writeConfig(p, text);
   const intervals = [];
-  const fakeApp = { vault, workspace: { onLayoutReady: (fn) => fn(), on: () => ({}), getActiveFile: () => null }, fileManager: null };
+  const fakeApp = Object.assign({ vault, workspace: { onLayoutReady: (fn) => fn(), on: () => ({}), getActiveFile: () => null }, fileManager: null }, opts.app);
   const plugin = new MarkportSyncPlugin(fakeApp, { id: 'markport-sync' });
   let saved = null;
   plugin.loadData = async () => saved;
@@ -401,6 +406,10 @@ test('configSynced: which parts of .obsidian are synced', () => {
   assert.ok(!H.configSynced('.obsidian/workspace-mobile.json', sys, 'markport-sync'));
   assert.ok(!H.configSynced('.obsidian/plugins/x/.git/HEAD', sys, 'markport-sync'));
   assert.ok(!H.configSynced('notes/app.json', sys, 'markport-sync'));
+  assert.equal(H.systemCodeId('.obsidian/plugins/markport-clipper/main.js', sys), 'markport-clipper');
+  assert.equal(H.systemCodeId('.obsidian/plugins/markport-clipper/data.json', sys), null, 'settings sync both ways instead');
+  assert.equal(H.systemCodeId('.obsidian/plugins/dataview/main.js', sys), null);
+  assert.equal(H.systemCodeId('.obsidian/plugins/markport-share/.hidden', sys), null);
   const enc = (v) => new TextEncoder().encode(JSON.stringify(v)).buffer;
   const dec = (b) => JSON.parse(new TextDecoder().decode(b));
   assert.deepEqual(dec(H.communityForServer(enc(['dataview', 'markport-clipper']), sys)), ['dataview']);
@@ -441,9 +450,11 @@ test('settings and plugins sync with the server vault when the option is on', as
   assert.equal(await server('.obsidian/workspace.json'), '{"layout":"server"}');
   assert.equal(vault._config('.obsidian/workspace.json'), '{"layout":"here"}');
   assert.equal(await server('.obsidian/plugins/markport-sync/data.json'), null);
-  // Markport's own plugins: their settings travel, their code doesn't.
+  // Markport's own plugins: their settings travel both ways, their code
+  // only from the server - this device's old copy is replaced, never uploaded.
   assert.equal(await server('.obsidian/plugins/markport-clipper/data.json'), '{"library":{}}');
   assert.equal(await server('.obsidian/plugins/markport-clipper/main.js'), null);
+  assert.equal(vault._config('.obsidian/plugins/markport-clipper/main.js'), await repoPlugin('markport-clipper/main.js'));
   assert.deepEqual(JSON.parse(await server('.obsidian/community-plugins.json')), ['dataview']);
 
   // Changed in Markport: arrives here on the next full comparison. The
@@ -466,6 +477,43 @@ test('settings and plugins sync with the server vault when the option is on', as
   await linkSync.run('full', () => linkSync.reconcile(''));
   assert.equal(await server('.obsidian/plugins/dataview/main.js'), null);
   assert.equal(await server('.trash/.obsidian/plugins/dataview/main.js'), 'dataview code');
+});
+
+test('Markport\'s own plugins are installed on a new device and kept up to date', async (t) => {
+  const enabled = [];
+  const { vault, web, linkSync, serverVaultDir } = await setup(t, {
+    folder: '',
+    settings: { syncConfig: true },
+    app: { plugins: { async loadManifests() {}, async enablePluginAndSave(id) { enabled.push(id); } } },
+  });
+  await linkSync.queue;
+  // Markport's own plugins: the ones in src/plugins.
+  const ids = (await fsp.readdir(repoPluginsDir, { withFileTypes: true })).filter((e) => e.isDirectory()).map((e) => e.name);
+  assert.ok(ids.includes('markport-clipper') && ids.includes('markport-root-folder'));
+
+  // A fresh vault gets every file of each, as the server serves it, and turns each on once.
+  for (const id of ids) {
+    for (const name of await fsp.readdir(path.join(repoPluginsDir, id))) {
+      if (name.startsWith('.')) continue;
+      assert.equal(vault._config('.obsidian/plugins/' + id + '/' + name), await repoPlugin(id + '/' + name), id + '/' + name);
+    }
+  }
+  assert.deepEqual([...enabled].sort(), [...ids].sort());
+  // Third-party plugins the server serves from vendor/plugins are left to each device.
+  for (const id of require('../system-plugins').getSystemPluginIds()) {
+    if (!ids.includes(id)) assert.equal(vault._config('.obsidian/plugins/' + id + '/manifest.json'), null, id);
+  }
+  // Nothing of it went into the server vault.
+  assert.deepEqual(await fsp.readdir(path.join(serverVaultDir, '.obsidian', 'plugins')).catch(() => []), []);
+
+  // Changed or removed here: put back. Uninstalled: back, but not turned on again.
+  await vault._writeConfig('.obsidian/plugins/markport-root-folder/main.js', 'edited here');
+  await vault.adapter.remove('.obsidian/plugins/markport-root-folder/manifest.json');
+  await linkSync.run('full', () => linkSync.reconcile(''));
+  assert.equal(vault._config('.obsidian/plugins/markport-root-folder/main.js'), await repoPlugin('markport-root-folder/main.js'));
+  assert.equal(vault._config('.obsidian/plugins/markport-root-folder/manifest.json'), await repoPlugin('markport-root-folder/manifest.json'));
+  assert.equal(enabled.filter((id) => id === 'markport-root-folder').length, 1);
+  assert.equal(await web.read('.obsidian/plugins/markport-root-folder/main.js'), null);
 });
 
 test('settings and plugins stay apart unless the option is on', async (t) => {

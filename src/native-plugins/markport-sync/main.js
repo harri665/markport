@@ -42,7 +42,8 @@
  * "Sync settings and plugins" on, the link that syncs this whole vault also
  * keeps .obsidian in step - see "Settings and plugins" in LinkSync - on
  * every full comparison rather than live (the server's watcher doesn't
- * report hidden paths).
+ * report hidden paths), and installs Markport's own plugins from the server
+ * (see "Markport's own plugins").
  *
  * The plugin is plain CommonJS with no build step, like the plugins in
  * src/plugins/. It is not one of those system plugins (Markport itself
@@ -133,11 +134,12 @@ function shareTarget(links, localPath) {
   return null;
 }
 
-// Whether a path in the server's .obsidian is synced. Not: dotfiles, the
-// window layout, this plugin's own folder (its token and links belong to
-// this device), and the code of Markport's system plugins - the server
-// serves those itself, and a copy uploaded into the vault would pin an old
-// version there. Their data.json (settings, the clipper's image library)
+// Whether a path in the server's .obsidian is synced both ways. Not:
+// dotfiles, the window layout, this plugin's own folder (its token and
+// links belong to this device), and the code of Markport's system plugins -
+// the server serves those itself, and a copy uploaded into the vault would
+// pin an old version there. That code is installed here one way instead
+// (systemCodeId). Their data.json (settings, the clipper's image library)
 // is synced.
 function configSynced(rel, systemIds, selfId) {
   if (typeof rel !== 'string' || !rel.startsWith(CONFIG + '/')) return false;
@@ -150,6 +152,17 @@ function configSynced(rel, systemIds, selfId) {
     if ((systemIds || []).includes(m[1])) return m[2] === 'data.json';
   }
   return true;
+}
+
+// The plugin id when rel is the code of one of Markport's system plugins
+// (any file in its folder except data.json), else null. That code goes one
+// way, server to here: see "Markport's own plugins" in LinkSync.
+function systemCodeId(rel, systemIds) {
+  if (typeof rel !== 'string') return null;
+  const m = /^\.obsidian\/plugins\/([^/]+)\/(.+)$/.exec(rel);
+  if (!m || !(systemIds || []).includes(m[1]) || m[2] === 'data.json') return null;
+  if (m[2].split('/').some((x) => !x || x.startsWith('.'))) return null;
+  return m[1];
 }
 
 // community-plugins.json lists the enabled plugins. The server leaves
@@ -1029,7 +1042,101 @@ class LinkSync {
       try { if (await this.applyConfig(p)) changedHere.push(p.rel); }
       catch (err) { this.fail(p.rel, err); }
     });
+    // An older server doesn't list the system plugins' code: leave it alone.
+    if (this.syncsAllConfig() && Array.isArray(tree.systemFiles)) {
+      try { await this.syncSystemPlugins(tree, changedHere); } catch (err) { this.fail('Markport plugins', err); }
+    }
     if (changedHere.length) this.plugin.configArrived(changedHere);
+    this.plugin.saveSoon();
+  }
+
+  // ── Markport's own plugins ──
+  //
+  // With "Sync settings and plugins" on, the code of Markport's system
+  // plugins (the image library, Root Folder, ...) is installed here and kept
+  // at the server's version, one way. The server serves that code to every
+  // vault from its own copy, so nothing here is ever uploaded, and a file
+  // changed or removed here is put back on the next comparison.
+  //
+  // A plugin new to this device is turned on once. After that, on or off is
+  // this device's choice: the server leaves these ids out of its
+  // community-plugins.json. Uninstalled here, it comes back turned off.
+  async syncSystemPlugins(tree, changedHere) {
+    const adapter = this.app.vault.adapter;
+    const state = this.configState();
+    if (!state.system) state.system = {};       // rel -> { rm, rs, lm, ls }
+    if (!state.systemOn) state.systemOn = {};   // id -> 1 once turned on here
+    const seen = state.system;
+    const manifestOf = (id) => this.configLocal(CONFIG + '/plugins/' + id + '/manifest.json');
+
+    // tree.files first: a copy in the vault's own folder is what the server serves.
+    const remote = new Map();
+    for (const f of tree.files.concat(tree.systemFiles)) {
+      if (systemCodeId(f.path, this.systemIds) && !remote.has(f.path)) remote.set(f.path, f);
+    }
+    const ids = [...new Set([...remote.keys()].map((rel) => systemCodeId(rel, this.systemIds)))];
+    const fresh = [];
+    for (const id of ids) if (!(await adapter.exists(manifestOf(id)))) fresh.push(id);
+
+    const plan = [];
+    for (const [rel, r] of remote) {
+      const b = seen[rel];
+      const st = await adapter.stat(this.configLocal(rel));
+      const local = st && st.type !== 'folder' ? st : null;
+      if (!local || !b || !sameStat(r, { mtime: b.rm, size: b.rs }) || !sameStat(local, { mtime: b.lm, size: b.ls })) plan.push(rel);
+    }
+
+    const written = [];
+    await pool(plan, PARALLEL, async (rel) => {
+      try {
+        const r = remote.get(rel);
+        const lp = this.configLocal(rel);
+        const buf = await this.download(rel);
+        const had = (await adapter.exists(lp)) ? await adapter.readBinary(lp) : null;
+        let l;
+        if (had && sameBytes(had, buf)) {
+          const st = await adapter.stat(lp);
+          l = { mtime: st.mtime, size: st.size };
+        } else {
+          l = await this.writeConfigLocal(lp, buf);
+          written.push(rel);
+        }
+        seen[rel] = { rm: r.mtime, rs: r.size, lm: l.mtime, ls: l.size };
+      } catch (err) {
+        this.fail(rel, err);
+      }
+    });
+
+    // Installed here before, gone from the server since: a plugin's update
+    // dropped the file, or the server no longer has the plugin.
+    for (const rel of Object.keys(seen)) {
+      if (remote.has(rel)) continue;
+      delete seen[rel];
+      const lp = this.configLocal(rel);
+      try {
+        if (await adapter.exists(lp)) { await adapter.remove(lp); written.push(rel); }
+      } catch (err) {
+        this.fail(rel, err);
+      }
+    }
+
+    // Turn on what was just installed, once. Obsidian loads it right away.
+    const plugins = this.app.plugins;
+    const live = new Set();
+    for (const id of fresh) {
+      if (state.systemOn[id] || !(await adapter.exists(manifestOf(id)))) continue;
+      state.systemOn[id] = 1;
+      if (!plugins || typeof plugins.enablePluginAndSave !== 'function') continue;
+      try {
+        if (typeof plugins.loadManifests === 'function') await plugins.loadManifests();
+        await plugins.enablePluginAndSave(id);
+        live.add(id);
+      } catch (err) {
+        this.fail(id, err);
+      }
+    }
+    // Code that changed under a plugin already loaded runs after a reload.
+    for (const rel of written) if (!live.has(systemCodeId(rel, this.systemIds))) changedHere.push(rel);
     this.plugin.saveSoon();
   }
 
@@ -1886,6 +1993,7 @@ class MarkportSyncSettingTab extends obsidian.PluginSettingTab {
       .setDesc(createFragment((f) => {
         f.appendText('Also keep this vault\'s ' + (this.app.vault.configDir || CONFIG) + ' folder in step with the server vault: ' +
           'settings, hotkeys, themes, snippets, and the community plugins with their settings. ' +
+          'Markport\'s own plugins (the image library, Root Folder) are installed from the server and kept up to date. ' +
           'Only for a server vault synced into this whole vault. Checked on every full comparison, not live. ');
         f.appendText('The first time, this device\'s copy wins wherever they differ (the server\'s goes into its .trash). ' +
           'The window layout and Markport Sync\'s own sign-in stay on each device. Reload Obsidian to use what arrives. ');
@@ -1959,7 +2067,7 @@ module.exports = MarkportSyncPlugin;
 module.exports.helpers = {
   normalizeServerUrl, normalizeFolder, isHidden, toLocal, toRel, under, foldersOverlap, shareTarget,
   sameStat, decide, conflictPath, trashPath, sameBytes, diffHunks, merge3, vaultName,
-  configSynced, ALWAYS_CONFIG, communityForServer, communityForHere, sameIdLists,
+  configSynced, systemCodeId, ALWAYS_CONFIG, communityForServer, communityForHere, sameIdLists,
 };
 module.exports.LinkSync = LinkSync;
 module.exports.HttpError = HttpError;
