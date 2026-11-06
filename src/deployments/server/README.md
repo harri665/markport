@@ -90,6 +90,8 @@ docker run --rm -v obsidian-web2_markport-data:/data -v "$PWD":/backup alpine \
 ```
 
 The volume name is `<project>_markport-data`. `docker volume ls` shows it.
+`/data/media-cache` needs no backup: it only holds thumbnails and optimized
+copies, which the server makes again when they are missing.
 
 ## Reverse proxy
 
@@ -172,6 +174,8 @@ files, so the password is simpler). WebSockets work through tunnels without extr
 | `WATCH_POLLING` | `false` | `true` for network filesystems |
 | `OBSIDIAN_VERSION` | `1.12.7` | Obsidian release to bundle; 1.13+ does not boot |
 | `MARKPORT_NODE_BRIDGE` | `false` | `true`: desktop-only plugins run their Node code in the container, and Claude Code is installed in the image. See below |
+| `MARKPORT_MEDIA_CACHE_MB` | `5120` | size cap of the image library's cache (`/data/media-cache`): thumbnails, previews and web-optimized 3D models. Never inside a vault; safe to delete |
+| `MARKPORT_IMAGEMAGICK` | `true` | build the image with ImageMagick, for previews of HEIC, JPEG XL, JPEG 2000, EXR, HDR, DDS, XCF, BMP, ICO and more |
 
 The image also sets the server's own variables (`HOST`, `PORT`, `VAULTS_DIR`,
 `VAULT_PATH`, `VAULT_REGISTRY`, `HOME=/data/home`). See "Configuration" in the
@@ -182,7 +186,9 @@ root `README.md`.
 Right-click a note or folder in a vault and choose **Share link…**. Each link (`/s/<id>`) is a
 read-only page rendered on the server with your theme. With **Can edit**, the page also offers
 **Open in editor**, the Obsidian editor limited to that note, or to that folder and its
-subfolders. Recipients don't need an account. Links can have a password and an expiry date,
+subfolders. Recipients don't need an account. Links can have a custom name (`/s/project-alpha`
+instead of the random id, which keeps working; it's guessable, so add a password to anything
+private), a password and an expiry date,
 and you can revoke them from the same dialog or with **Manage shared links** (command palette).
 
 What a link can reach is enforced by the server on every request: the shared item, plus

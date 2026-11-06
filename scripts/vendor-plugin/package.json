@@ -1,0 +1,16 @@
+{
+  "name": "markport-clipper-vendor",
+  "private": true,
+  "license": "GPL-3.0-only",
+  "description": "Builds the third-party libraries the image library plugin loads on demand (src/plugins/markport-clipper/vendor-*.js). Run: npm install && npm run build",
+  "scripts": {
+    "build": "node build.js"
+  },
+  "devDependencies": {
+    "ag-psd": "34.1.0",
+    "esbuild": "0.28.2",
+    "fflate": "0.8.3",
+    "three": "0.187.0",
+    "utif2": "4.1.0"
+  }
+}

@@ -244,7 +244,7 @@ function hasTag(tags, tag) {
 // must be on the image (or a parent of one of its tags), every color: must be
 // one of the image's main colors.
 function matchesQuery(item, query) {
-  const hay = [item.path, item.note, item.source, item.title, (item.tags || []).join(' ')].join('\n').toLowerCase();
+  const hay = [item.path, item.note, item.source, item.title, item.kind || '', (item.tags || []).join(' ')].join('\n').toLowerCase();
   return query.words.every((w) => hay.includes(w) || (COLOR_NAMES[w] && paletteHas(item.colors, hexToRgb(COLOR_NAMES[w]))))
     && query.tags.every((t) => hasTag(item.tags, t))
     && (query.colors || []).every((rgb) => paletteHas(item.colors, rgb));
@@ -460,6 +460,31 @@ class PromptModal extends obsidian.Modal {
   onClose() { this.contentEl.empty(); }
 }
 
+// Several frames were dropped: one flipbook, or separate images?
+class FlipbookImportModal extends obsidian.Modal {
+  constructor(app, count, name, onlyFlipbook, onChoose) {
+    super(app);
+    Object.assign(this, { count, name, onlyFlipbook, onChoose });
+  }
+  onOpen() {
+    this.titleEl.setText(this.onlyFlipbook ? 'Import a flipbook' : 'Import ' + this.count + ' frames');
+    this.contentEl.createEl('p', {
+      text: (this.onlyFlipbook ? '' : 'These look like numbered frames. ')
+        + 'A flipbook is a folder named "<name>.flipbook" holding the frames, unchanged; the library shows it as one item you can scrub through.',
+    });
+    const input = this.contentEl.createEl('input', { type: 'text', cls: 'mpl-prompt', attr: { placeholder: 'Flipbook name' } });
+    input.value = this.name;
+    const done = (choice) => { const v = input.value; this.close(); this.onChoose(choice, v); };
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); done('flipbook'); } });
+    const btns = this.contentEl.createDiv({ cls: 'modal-button-container' });
+    btns.createEl('button', { cls: 'mod-cta', text: 'Import as one flipbook' }).addEventListener('click', () => done('flipbook'));
+    if (!this.onlyFlipbook) btns.createEl('button', { text: 'Separate images' }).addEventListener('click', () => done('separate'));
+    btns.createEl('button', { text: 'Cancel' }).addEventListener('click', () => this.close());
+    setTimeout(() => { input.focus(); input.select(); }, 0);
+  }
+  onClose() { this.contentEl.empty(); }
+}
+
 class ConfirmModal extends obsidian.Modal {
   constructor(app, title, text, cta, onYes) {
     super(app);
@@ -651,6 +676,10 @@ const ICONS = {
   pin: ['M6 2h4l-1 4 3 3H4l3-3z', 'M8 9v5'],
   openWin: ['M9 2h5v5', 'M14 2L8 8', 'M12 10v4H2V4h4'],
   plus: ['M8 3v10', 'M3 8h10'],
+  play: ['M5 3.5v9l7-4.5z'],
+  pause: ['M5.5 3.5v9', 'M10.5 3.5v9'],
+  rotate: ['M13 8a5 5 0 1 1-1.5-3.6', 'M13 2.5v3h-3'],
+  reset: ['M3 8a5 5 0 1 0 1.5-3.6', 'M3 2.5v3h3'],
   logo: [{ t: 'circle', cx: 6.8, cy: 6.8, r: 4.4 }, 'M10 10l3.6 3.6'],
 };
 
@@ -1075,22 +1104,24 @@ class BoardCanvas {
   renderFile(e, n) {
     const body = e._body;
     body.replaceChildren();
-    e.classList.remove('is-missing', 'is-doc');
-    const f = this.app.vault.getAbstractFileByPath(n.file);
-    if (isImageFile(f)) {
-      const img = h('img', null, body);
-      img.draggable = false;
-      img.alt = f.basename;
-      img.decoding = 'async';
-      img.addEventListener('load', () => {
-        if (!this.pendingAspect.has(n.id) || !(img.naturalWidth > 0)) return;
+    e.classList.remove('is-missing', 'is-doc', 'is-model', 'is-flipbook');
+    const item = this.plugin.media.item(n.file);
+    if (item) {
+      // Images, flipbooks (hover to scrub) and models (their turntable).
+      e.classList.toggle('is-model', item.kind === 'model');
+      e.classList.toggle('is-flipbook', item.kind === 'flipbook');
+      const pic = mountMediaPicture(this.plugin, body, item, { width: 1024 });
+      h('div', 'mpl-none', body, item.kind === 'model' ? '3D model' : item.extension.toUpperCase());
+      if (item.kind !== 'image') h('span', 'mpl-kind', body, kindLabel(item));
+      pic.img.addEventListener('load', () => {
+        const img = pic.img;
+        if (item.kind === 'model' || !this.pendingAspect.has(n.id) || !(img.naturalWidth > 0)) return;
         this.pendingAspect.delete(n.id);
         n.height = Math.round(n.width * img.naturalHeight / img.naturalWidth);
         this.commit();
       });
-      img.addEventListener('error', () => { e.classList.add('is-missing'); body.textContent = f.name; });
-      img.src = this.app.vault.getResourcePath(f);
     } else {
+      const f = this.app.vault.getAbstractFileByPath(n.file);
       e.classList.add(f ? 'is-doc' : 'is-missing');
       body.textContent = (f ? '' : 'Missing: ') + String(n.file || '').split('/').pop();
     }
@@ -1172,8 +1203,9 @@ class BoardCanvas {
   node(id) { return this.data ? this.data.nodes.find((n) => n.id === id) : null; }
   stroke(id) { return this.data ? this.data.markport.strokes.find((s) => s.id === id) : null; }
 
+  // A file node showing a library item (image, flipbook or 3D model).
   isImageNode(n) {
-    return !!n && n.type === 'file' && isImageFile(this.app.vault.getAbstractFileByPath(n.file));
+    return !!n && n.type === 'file' && !!this.plugin.media.item(n.file);
   }
 
   imageNodes() { return this.data ? this.data.nodes.filter((n) => this.isImageNode(n)) : []; }
@@ -1188,9 +1220,9 @@ class BoardCanvas {
     for (const n of this.selectedImageNodes()) {
       if (seen.has(n.file)) continue;
       seen.add(n.file);
-      out.push(this.app.vault.getAbstractFileByPath(n.file));
+      out.push(this.plugin.media.item(n.file));
     }
-    return out;
+    return out.filter(Boolean);
   }
 
   clearSelection() {
@@ -1210,7 +1242,7 @@ class BoardCanvas {
     const nodes = this.imageNodes();
     const i = nodes.indexOf(n);
     if (i < 0) return;
-    this.opts.onFull(nodes.map((x) => this.app.vault.getAbstractFileByPath(x.file)), i, (j) => this.selectNode(nodes[j]));
+    this.opts.onFull(nodes.map((x) => this.plugin.media.item(x.file)), i, (j) => this.selectNode(nodes[j]));
   }
 
   fullForSelection() {
@@ -1548,9 +1580,10 @@ class BoardCanvas {
     if (n && this.isImageNode(n)) {
       menu.addItem((i) => i.setTitle('Full screen').setIcon('maximize-2').onClick(() => this.fullFor(n)));
       if (this.opts.onDetails) menu.addItem((i) => i.setTitle('Details').setIcon('info').onClick(() => this.opts.onDetails()));
-      menu.addItem((i) => i.setTitle('Open image').setIcon('image').onClick(() => {
-        this.app.workspace.getLeaf('tab').openFile(this.app.vault.getAbstractFileByPath(n.file));
-      }));
+      const f = this.app.vault.getAbstractFileByPath(n.file);
+      if (f instanceof obsidian.TFile) {
+        menu.addItem((i) => i.setTitle('Open file').setIcon('image').onClick(() => this.app.workspace.getLeaf('tab').openFile(f)));
+      }
       menu.addSeparator();
     }
     if (n && n.type === 'text') menu.addItem((i) => i.setTitle('Edit note').setIcon('pencil').onClick(() => this.editText(n)));
@@ -1727,8 +1760,9 @@ class BoardCanvas {
     const added = [];
     let x = p.x - IMG_W / 2;
     for (const path of paths) {
-      if (!isImageFile(this.app.vault.getAbstractFileByPath(path))) continue;
-      const d = this.plugin.dims(path);
+      const item = this.plugin.media.item(path);
+      if (!item) continue;
+      const d = item.kind === 'model' ? [1, 1] : this.plugin.dims(item.kind === 'flipbook' ? item.frames[0].path : path) || this.plugin.dims(path);
       const hh = Math.round(d ? IMG_W * d[1] / d[0] : IMG_W * 3 / 4);
       const n = { id: newNodeId(), type: 'file', file: path, x: Math.round(x), y: Math.round(p.y - hh / 2), width: IMG_W, height: hh };
       if (!d) this.pendingAspect.add(n.id);
@@ -1803,16 +1837,13 @@ class MiniBoard {
       const t = h('div', 'mpl-mini-thumb', this.stripEl);
       t.draggable = true;
       t.title = f.basename;
-      const d = this.plugin.dims(f.path);
+      const d = f.kind === 'model' ? [1, 1] : this.plugin.dims(f.path);
       if (d) t.style.aspectRatio = String(clampAspect(d[0] / d[1]));
-      const img = h('img', null, t);
-      img.loading = 'lazy';
-      img.draggable = false;
-      img.alt = f.basename;
-      img.src = this.plugin.app.vault.getResourcePath(f);
+      mountMediaPicture(this.plugin, t, f, { width: THUMB_W, lazy: true });
       t.addEventListener('dragstart', (e) => {
         e.dataTransfer.setData('application/x-markport-images', JSON.stringify([f.path]));
-        e.dataTransfer.setData('text/plain', '!' + this.plugin.app.fileManager.generateMarkdownLink(f, ''));
+        const linkTo = f.kind === 'flipbook' ? f.frames[0] : f.file;
+        e.dataTransfer.setData('text/plain', '!' + this.plugin.app.fileManager.generateMarkdownLink(linkTo, ''));
         e.dataTransfer.effectAllowed = 'copy';
       });
       t.addEventListener('dblclick', () => {
@@ -1870,6 +1901,1120 @@ class PinnedBoardView extends obsidian.ItemView {
   async onClose() {
     if (this.mini) this.mini.destroy();
     this.mini = null;
+  }
+}
+
+// ── Media: images, 3D models and flipbooks ──────────────────────────────────
+//
+// The library shows three kinds of item:
+//
+//   image     any image file. Browser formats are shown as they are; PSD/PSB,
+//             TIFF, TGA, QOI, Krita/OpenRaster/Procreate and camera RAW are
+//             decoded in memory (a worker thread) for display; with a Markport
+//             server, everything gets a small cached WebP from /api/media.
+//   model     GLB/glTF, OBJ, FBX, STL, PLY, 3MF, DAE, USDZ: a live three.js
+//             viewer in Details and full screen.
+//   flipbook  a folder named "<name>.flipbook" holding frames (any image
+//             format): one item you scrub through. A flipbook with the same
+//             name as a model, next to it, is that model's turntable.
+//
+// Rules: the vault holds originals only, never anything derived. Locally
+// (desktop Obsidian, in-browser vaults) nothing is converted or optimized;
+// decoded pixels live in memory, plus small thumbnails of decoded formats in
+// the app's own storage (IndexedDB). With a Markport server, the server makes
+// cached thumbnails and web-optimized models outside the vault, and a browser
+// renders each model's turntable once for the server to cache.
+
+const THUMB_W = 480;
+const PREVIEW_W = 2048;
+// version: bump when turntables should be rendered again (it is part of their cache key).
+const TURNTABLE = { frames: 36, cols: 6, size: 256, version: 2 };
+const VENDOR = {
+  three: 'vendor-three.js',
+  decoders: 'vendor-decoders.js',
+  draco: 'vendor-draco-decoder.js',
+  formats: 'media-formats.js',
+};
+
+// Used until media-formats.js has loaded (and if it cannot be).
+const FALLBACK_FORMATS = {
+  extOf: (n) => { const s = String(n || ''); const i = s.lastIndexOf('.'); return i > 0 ? s.slice(i + 1).toLowerCase() : ''; },
+  kindOf: (n) => (IMAGE_EXTS.has(FALLBACK_FORMATS.extOf(String(n).includes('.') ? n : '.' + n)) ? 'image' : ''),
+  imageSupport: (e) => (IMAGE_EXTS.has(String(e).toLowerCase()) && !['tiff', 'heic', 'heif'].includes(String(e).toLowerCase()) ? 'web' : ''),
+  isFlipbookName: (n) => /\.flipbook$/i.test(String(n || '')),
+  flipbookBase: (n) => String(n || '').replace(/\.flipbook$/i, ''),
+  sortFrames: (a) => a.slice().sort((x, y) => x.localeCompare(y, undefined, { numeric: true, sensitivity: 'base' })),
+  MODEL_SIDECAR: ['mtl', 'bin'],
+  RAW_CAMERA: [],
+};
+
+class MediaItem {
+  constructor(kind, file, frames) {
+    this.kind = kind;       // image | model | flipbook
+    this.file = file;       // TFile, or the flipbook's TFolder
+    this.frames = frames || null;
+  }
+  get path() { return this.file.path; }
+  get name() { return this.file.name; }
+  get parent() { return this.file.parent; }
+  get basename() { return this.kind === 'flipbook' ? this.file.name.replace(/\.flipbook$/i, '') : this.file.basename; }
+  get extension() { return this.kind === 'flipbook' ? 'flipbook' : String(this.file.extension || ''); }
+  get stat() {
+    if (this.kind !== 'flipbook') return this.file.stat;
+    if (!this._stat) {
+      let mtime = 0, ctime = Infinity, size = 0;
+      for (const f of this.frames) { mtime = Math.max(mtime, f.stat.mtime); ctime = Math.min(ctime, f.stat.ctime); size += f.stat.size; }
+      this._stat = { mtime, ctime: ctime === Infinity ? mtime : ctime, size };
+    }
+    return this._stat;
+  }
+  // A frame, as an image item (for thumbnails).
+  frame(i) {
+    if (!this.frames || !this.frames.length) return null;
+    this._frameItems = this._frameItems || [];
+    const k = Math.max(0, Math.min(this.frames.length - 1, i | 0));
+    return this._frameItems[k] || (this._frameItems[k] = new MediaItem('image', this.frames[k]));
+  }
+}
+
+// Pure (tests): does a set of file names look like numbered frames?
+function looksLikeSequence(names) {
+  if (!names || names.length < 2) return false;
+  const stem = (n) => String(n).replace(/\.[^.]+$/, '').replace(/\d+/g, '#').toLowerCase();
+  const first = stem(names[0]);
+  return first.includes('#') && names.every((n) => stem(n) === first);
+}
+
+// Decode one image for display, in a worker or on the main thread. Pure in
+// the sense that matters: it is serialized with toString() into the worker,
+// so it may only use its arguments and what both a worker and a window
+// have (createImageBitmap, OffscreenCanvas or <canvas>, Blob).
+//   F: media-formats.js, D: vendor-decoders.js
+// Returns { thumb: Blob, preview: Blob, width, height }.
+async function decodeForDisplay(F, D, bytes, ext, sizes) {
+  const b = new Uint8Array(bytes);
+  const e = String(ext).toLowerCase();
+  let rgba = null;
+  let blob = null;
+  if (e === 'psd' || e === 'psb') {
+    // ag-psd makes its image data through a canvas factory; a worker has no document.
+    if (!globalThis.__mplPsdCanvas && D.initializeCanvas) {
+      D.initializeCanvas(
+        (w, hh) => (typeof OffscreenCanvas !== 'undefined' ? new OffscreenCanvas(w, hh) : Object.assign(document.createElement('canvas'), { width: w, height: hh })),
+        (w, hh) => new ImageData(w, hh),
+      );
+      globalThis.__mplPsdCanvas = true;
+    }
+    const psd = D.readPsd(b, { skipLayerImageData: true, skipThumbnail: true, useImageData: true });
+    if (!psd.imageData) throw new Error('This PSD has no flattened image (save it with "Maximize compatibility")');
+    rgba = psd.imageData;
+  } else if (e === 'tif' || e === 'tiff') {
+    const ifds = D.UTIF.decode(b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength));
+    if (!ifds.length) throw new Error('Empty TIFF');
+    const area = (p) => (p.width || (p.t256 && p.t256[0]) || 0) * (p.height || (p.t257 && p.t257[0]) || 0);
+    const page = ifds.reduce((x, y) => (area(y) > area(x) ? y : x));
+    D.UTIF.decodeImage(b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength), page, ifds);
+    rgba = { width: page.width, height: page.height, data: new Uint8ClampedArray(D.UTIF.toRGBA8(page).buffer) };
+  } else if (e === 'tga' || e === 'icb' || e === 'vda' || e === 'vst') {
+    rgba = F.decodeTGA(b);
+  } else if (e === 'qoi') {
+    rgba = F.decodeQOI(b);
+  } else if (e === 'kra' || e === 'ora' || e === 'procreate') {
+    const png = F.zipImage(e, b, (bytesIn, name) => D.unzipSync(bytesIn, { filter: (f) => f.name === name })[name] || null);
+    if (!png) throw new Error('No flattened image in this file');
+    blob = new Blob([png], { type: 'image/png' });
+  } else if (F.RAW_CAMERA.includes(e)) {
+    const jpg = F.largestEmbeddedJpeg(b);
+    if (!jpg) throw new Error('No preview image in this RAW file');
+    blob = new Blob([jpg.bytes], { type: 'image/jpeg' });
+  } else {
+    blob = new Blob([b]);
+  }
+  let bmp;
+  if (rgba) {
+    const data = rgba.data instanceof Uint8ClampedArray ? rgba.data : new Uint8ClampedArray(rgba.data.buffer, rgba.data.byteOffset, rgba.data.byteLength);
+    bmp = await createImageBitmap(new ImageData(data, rgba.width, rgba.height));
+  } else {
+    bmp = await createImageBitmap(blob);
+  }
+  const width = bmp.width;
+  const height = bmp.height;
+  const encode = async (max) => {
+    const s = Math.min(1, max / Math.max(width, height));
+    const w = Math.max(1, Math.round(width * s));
+    const hgt = Math.max(1, Math.round(height * s));
+    const canvas = typeof OffscreenCanvas !== 'undefined' ? new OffscreenCanvas(w, hgt) : Object.assign(document.createElement('canvas'), { width: w, height: hgt });
+    const g = canvas.getContext('2d');
+    g.imageSmoothingQuality = 'high';
+    g.drawImage(bmp, 0, 0, w, hgt);
+    if (canvas.convertToBlob) return canvas.convertToBlob({ type: 'image/webp', quality: 0.85 });
+    return new Promise((resolve) => canvas.toBlob(resolve, 'image/webp', 0.85));
+  };
+  const out = { width, height };
+  for (const [name, max] of Object.entries(sizes)) out[name] = await encode(max);
+  if (bmp.close) bmp.close();
+  return out;
+}
+
+// A tiny IndexedDB store for thumbnails of decoded formats (local mode).
+class ThumbStore {
+  constructor(name) { this.name = name; this.db = null; }
+  open() {
+    if (this.db) return this.db;
+    this.db = new Promise((resolve) => {
+      if (typeof indexedDB === 'undefined') { resolve(null); return; }
+      const req = indexedDB.open(this.name, 1);
+      req.onupgradeneeded = () => req.result.createObjectStore('thumbs');
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => resolve(null);
+    });
+    return this.db;
+  }
+  async get(key) {
+    const db = await this.open();
+    if (!db) return null;
+    return new Promise((resolve) => {
+      const r = db.transaction('thumbs').objectStore('thumbs').get(key);
+      r.onsuccess = () => resolve(r.result || null);
+      r.onerror = () => resolve(null);
+    });
+  }
+  async put(key, value) {
+    const db = await this.open();
+    if (!db) return;
+    await new Promise((resolve) => {
+      const tx = db.transaction('thumbs', 'readwrite');
+      tx.objectStore('thumbs').put(value, key);
+      tx.oncomplete = tx.onerror = () => resolve();
+    });
+  }
+}
+
+class MediaLibrary {
+  constructor(plugin) {
+    this.plugin = plugin;
+    this.app = plugin.app;
+    this.F = FALLBACK_FORMATS;
+    this.server = null;          // { vault, caps } on a Markport server vault
+    this.index = null;           // path -> MediaItem
+    this.list = null;
+    this.vendor = new Map();     // file -> Promise<module>
+    this.urls = new Map();       // memory cache: key -> object URL (decoded images)
+    this.decodes = new Map();    // key -> Promise
+    this.decodeQueue = Promise.resolve();
+    this.thumbs = new ThumbStore('markport-clipper-media');
+    this.turntables = new Map(); // path@version -> Promise<url|null>
+    this.ttQueue = [];
+    this.ttBusy = false;
+  }
+
+  // ── setup ──
+
+  async init() {
+    try {
+      this.F = await this.loadVendor(VENDOR.formats);
+    } catch (e) {
+      console.warn('[markport-clipper] media-formats.js did not load; only browser image formats will show', e);
+    }
+    if (this.plugin.isMarkport()) {
+      const m = /\/vault\/([^/?#]+)/.exec(window.location.pathname);
+      const vault = m && decodeURIComponent(m[1]);
+      if (vault) {
+        try {
+          const r = await fetch('/api/media/caps?vault=' + encodeURIComponent(vault), { credentials: 'same-origin' });
+          const caps = r.ok ? await r.json() : null;
+          if (caps && caps.version >= 1 && caps.vaultKnown) this.server = { vault, caps };
+        } catch (_) { /* no media server: local mode */ }
+      }
+    }
+  }
+
+  pluginFile(name) {
+    return (this.plugin.manifest.dir || (this.app.vault.configDir + '/plugins/' + this.plugin.manifest.id)) + '/' + name;
+  }
+
+  // Evaluate one of the plugin's library files (CommonJS, self-contained).
+  loadVendor(name) {
+    if (!this.vendor.has(name)) {
+      this.vendor.set(name, (async () => {
+        const code = await this.app.vault.adapter.read(this.pluginFile(name));
+        const module = { exports: {} };
+        // eslint-disable-next-line no-new-func
+        new Function('module', 'exports', code + '\n//# sourceURL=markport-clipper/' + name)(module, module.exports);
+        return module.exports;
+      })());
+      this.vendor.get(name).catch(() => this.vendor.delete(name));
+    }
+    return this.vendor.get(name);
+  }
+
+  three() { return this.loadVendor(VENDOR.three); }
+
+  async dracoUrl() {
+    if (!this._draco) {
+      this._draco = (async () => {
+        const code = await this.app.vault.adapter.read(this.pluginFile(VENDOR.draco));
+        return URL.createObjectURL(new Blob([code], { type: 'text/javascript' }));
+      })();
+    }
+    return this._draco;
+  }
+
+  // ── the index of media items ──
+
+  invalidate() { this.index = null; this.list = null; }
+
+  // Does a vault change concern the library?
+  relevant(f) {
+    if (!f) return false;
+    if (f instanceof obsidian.TFolder) return true;
+    const ext = String(f.extension || '').toLowerCase();
+    return !!this.F.kindOf(ext) || this.F.MODEL_SIDECAR.includes(ext);
+  }
+
+  build() {
+    const F = this.F;
+    const old = this.index || new Map();
+    const index = new Map();
+    const list = [];
+    const keep = (item) => {
+      const prev = old.get(item.path);
+      const same = prev && prev.kind === item.kind && prev.file === item.file
+        && (item.kind !== 'flipbook' || (prev.frames.length === item.frames.length && prev.frames.every((f, i) => f === item.frames[i] && f.stat.mtime === prev._mt[i])));
+      const out = same ? prev : item;
+      if (out.kind === 'flipbook') out._mt = out.frames.map((f) => f.stat.mtime);
+      index.set(out.path, out);
+      list.push(out);
+    };
+    const walk = (folder) => {
+      for (const c of folder.children) {
+        if (c instanceof obsidian.TFolder) {
+          if (c.name.startsWith('.')) continue;
+          if (F.isFlipbookName(c.name)) {
+            const files = c.children.filter((x) => x instanceof obsidian.TFile && F.kindOf(x.extension) === 'image');
+            const order = F.sortFrames(files.map((x) => x.name));
+            const byName = new Map(files.map((x) => [x.name, x]));
+            const frames = order.map((n) => byName.get(n));
+            if (frames.length) keep(new MediaItem('flipbook', c, frames));
+            continue;   // frames are not separate items
+          }
+          walk(c);
+        } else if (c instanceof obsidian.TFile) {
+          const kind = F.kindOf(c.extension);
+          if (kind) keep(new MediaItem(kind, c));
+        }
+      }
+    };
+    walk(this.app.vault.getRoot());
+    this.index = index;
+    this.list = list;
+  }
+
+  all() { if (!this.list) this.build(); return this.list; }
+  item(path) { if (!this.index) this.build(); return this.index.get(path) || null; }
+
+  version(item) { return Math.floor(item.stat.mtime) + '-' + item.stat.size; }
+
+  // A model's turntable flipbook: "<name>.flipbook" next to it.
+  pairedFlipbook(item) {
+    if (item.kind !== 'model') return null;
+    const folder = parentPath(item.file);
+    return this.item(joinPath(folder, item.basename + '.flipbook'));
+  }
+
+  // ── image sources ──
+
+  apiUrl(endpoint, item, extra) {
+    const p = new URLSearchParams(Object.assign({ vault: this.server.vault, path: item.path, v: this.version(item) }, extra || {}));
+    return '/api/media/' + endpoint + '?' + p.toString();
+  }
+
+  support(item) {
+    return item.kind === 'image' ? this.F.imageSupport(item.extension) : '';
+  }
+
+  // A URL right away, when there is one without decoding: the server's
+  // thumbnail, or the original for browser formats. null = call src().
+  quickSrc(item, w) {
+    if (item.kind === 'flipbook') return this.quickSrc(item.frame(0), w);
+    if (item.kind !== 'image') return null;
+    const sup = this.support(item);
+    const ext = item.extension.toLowerCase();
+    if (this.server && ext !== 'svg' && (w <= PREVIEW_W || sup !== 'web')) return this.apiUrl('thumb', item, { w: w <= THUMB_W ? THUMB_W : PREVIEW_W });
+    if (sup === 'web') return this.app.vault.getResourcePath(item.file);
+    return null;
+  }
+
+  // The original, for full size viewing of browser formats.
+  originalSrc(item) {
+    if (item.kind === 'flipbook') return this.originalSrc(item.frame(0));
+    return item.kind === 'image' && this.support(item) === 'web' ? this.app.vault.getResourcePath(item.file) : null;
+  }
+
+  // Resolve to a displayable URL (decoding in memory when needed), or null.
+  async src(item, w) {
+    const quick = this.quickSrc(item, w);
+    if (quick) return quick;
+    if (item.kind !== 'image' || this.support(item) !== 'local') return null;
+    const r = await this.decoded(item, w <= THUMB_W ? 'thumb' : 'preview');
+    return r ? r.url : null;
+  }
+
+  // Decode a local-format image: thumbnail from IndexedDB when we have one,
+  // otherwise one decode (in the worker) gives both sizes.
+  async decoded(item, size) {
+    const key = this.app.vault.getName() + '|' + item.path + '|' + this.version(item);
+    const memo = this.urls.get(key + '|' + size);
+    if (memo) return memo;
+    if (size === 'thumb') {
+      const stored = await this.thumbs.get(key);
+      if (stored && stored.blob) {
+        const r = { url: URL.createObjectURL(stored.blob), width: stored.width, height: stored.height };
+        this.remember(key + '|thumb', r);
+        return r;
+      }
+    }
+    if (!this.decodes.has(key)) {
+      const job = this.decodeQueue.then(() => this.decodeNow(item)).then(async (out) => {
+        const thumb = { url: URL.createObjectURL(out.thumb), width: out.width, height: out.height };
+        const preview = { url: URL.createObjectURL(out.preview), width: out.width, height: out.height };
+        this.remember(key + '|thumb', thumb);
+        this.remember(key + '|preview', preview);
+        this.thumbs.put(key, { blob: out.thumb, width: out.width, height: out.height, t: Date.now() });
+        if (out.width && out.height) this.plugin.setMeta(item.path, { w: out.width, h: out.height });
+        return true;
+      }).catch((e) => {
+        console.warn('[markport-clipper] could not decode ' + item.path + ':', (e && e.message) || e);
+        return false;
+      }).finally(() => this.decodes.delete(key));
+      this.decodes.set(key, job);
+      this.decodeQueue = job.catch(() => {});
+    }
+    await this.decodes.get(key);
+    return this.urls.get(key + '|' + size) || null;
+  }
+
+  // Keep at most ~60 decoded images in memory.
+  remember(k, v) {
+    this.urls.set(k, v);
+    if (this.urls.size > 60) {
+      const [oldK, oldV] = this.urls.entries().next().value;
+      this.urls.delete(oldK);
+      URL.revokeObjectURL(oldV.url);
+    }
+  }
+
+  async decodeNow(item) {
+    const bytes = await this.app.vault.readBinary(item.file);
+    const sizes = { thumb: THUMB_W, preview: PREVIEW_W };
+    const worker = await this.worker().catch(() => null);
+    if (worker) {
+      return new Promise((resolve, reject) => {
+        const id = ++this.workerSeq;
+        this.workerJobs.set(id, { resolve, reject });
+        worker.postMessage({ id, bytes, ext: item.extension, sizes }, [bytes]);
+      });
+    }
+    const [F, D] = [this.F, await this.loadVendor(VENDOR.decoders)];
+    return decodeForDisplay(F, D, bytes, item.extension, sizes);
+  }
+
+  // One worker for all decoding: big PSDs never freeze the window.
+  worker() {
+    if (!this._worker) {
+      this._worker = (async () => {
+        if (typeof Worker === 'undefined' || typeof OffscreenCanvas === 'undefined') throw new Error('no worker');
+        const read = (n) => this.app.vault.adapter.read(this.pluginFile(n));
+        const [formats, decoders] = await Promise.all([read(VENDOR.formats), read(VENDOR.decoders)]);
+        const wrap = (code) => '(function(){var module={exports:{}};(function(module,exports){' + code + '\n})(module,module.exports);return module.exports;})()';
+        const src = 'var F=' + wrap(formats) + ';var D=' + wrap(decoders) + ';var decode=' + decodeForDisplay.toString() + ';'
+          + 'self.onmessage=async function(e){var m=e.data;try{var r=await decode(F,D,m.bytes,m.ext,m.sizes);self.postMessage({id:m.id,result:r});}'
+          + 'catch(err){self.postMessage({id:m.id,error:String((err&&err.message)||err)});}};';
+        const url = URL.createObjectURL(new Blob([src], { type: 'text/javascript' }));
+        const w = new Worker(url);
+        this.workerSeq = 0;
+        this.workerJobs = new Map();
+        w.onmessage = (e) => {
+          const job = this.workerJobs.get(e.data.id);
+          if (!job) return;
+          this.workerJobs.delete(e.data.id);
+          if (e.data.error) job.reject(new Error(e.data.error)); else job.resolve(e.data.result);
+        };
+        w.onerror = (e) => {
+          for (const job of this.workerJobs.values()) job.reject(new Error(e.message || 'worker failed'));
+          this.workerJobs.clear();
+        };
+        return w;
+      })();
+      this._worker.catch(() => { this._worker = Promise.reject(new Error('no worker')); this._worker.catch(() => {}); });
+    }
+    return this._worker;
+  }
+
+  // Width × height of the original, when it is known or cheap to learn.
+  async info(item) {
+    const d = this.plugin.dims(item.path);
+    if (d) return { width: d[0], height: d[1] };
+    if (item.kind === 'flipbook') return this.info(item.frame(0));
+    if (item.kind !== 'image') return null;
+    if (this.server) {
+      try {
+        const r = await fetch(this.apiUrl('info', item), { credentials: 'same-origin' });
+        const j = r.ok ? await r.json() : null;
+        if (j && j.width && j.height) {
+          if (!j.approximate) this.plugin.setMeta(item.path, { w: j.width, h: j.height });
+          return { width: j.width, height: j.height };
+        }
+      } catch (_) { /* unknown */ }
+    }
+    return null;
+  }
+
+  // ── turntables ──
+
+  // The model's turntable: a paired flipbook, or (Markport server) the
+  // sprite sheet a browser rendered. Resolves to
+  //   { flipbook: MediaItem } | { sheet: url, frames, cols } | null
+  async turntable(item) {
+    if (item.kind !== 'model') return null;
+    const paired = this.pairedFlipbook(item);
+    if (paired) return { flipbook: paired };
+    if (!this.server || !this.server.caps.turntables) return null;
+    const key = item.path + '@' + this.version(item);
+    if (!this.turntables.has(key)) {
+      this.turntables.set(key, (async () => {
+        const url = this.apiUrl('turntable', item, { r: TURNTABLE.version });
+        const r = await fetch(url, { method: 'HEAD', credentials: 'same-origin' }).catch(() => null);
+        if (r && r.ok) return url;
+        // Not made yet: render it in this browser (queued, one at a time).
+        return this.queueTurntable(item);
+      })());
+    }
+    const sheet = await this.turntables.get(key);
+    return sheet ? { sheet, frames: TURNTABLE.frames, cols: TURNTABLE.cols } : null;
+  }
+
+  queueTurntable(item) {
+    return new Promise((resolve) => {
+      this.ttQueue.push({ item, resolve });
+      this.pumpTurntables();
+    });
+  }
+
+  async pumpTurntables() {
+    if (this.ttBusy) return;
+    this.ttBusy = true;
+    try {
+      while (this.ttQueue.length) {
+        const { item, resolve } = this.ttQueue.shift();
+        try { resolve(await this.renderTurntable(item)); } catch (e) {
+          console.warn('[markport-clipper] turntable for ' + item.path + ' failed:', (e && e.message) || e);
+          resolve(null);
+        }
+        await new Promise((r) => setTimeout(r, 50));
+      }
+    } finally {
+      this.ttBusy = false;
+    }
+  }
+
+  // Render TURNTABLE.frames views around the model into one WebP sheet, store
+  // it on the server; and while the model is loaded, give the server a GLB of
+  // it when the server cannot convert the original format itself.
+  async renderTurntable(item) {
+    if (!this.server || item.stat.size > 300 * 1024 * 1024) return null;
+    const V = await this.three();
+    const { object, optimized } = await this.loadModel(item, { preferOptimized: true });
+    if (!optimized) this.sendModelSource(item, object, V).catch(() => {});
+    const { frames, cols, size } = TURNTABLE;
+    const rows = Math.ceil(frames / cols);
+    const stage = new ModelStage(V, null, { width: size, height: size, offscreen: true });
+    try {
+      stage.setObject(object);
+      const sheet = document.createElement('canvas');
+      sheet.width = cols * size;
+      sheet.height = rows * size;
+      const g = sheet.getContext('2d');
+      for (let i = 0; i < frames; i++) {
+        stage.orbit((i / frames) * Math.PI * 2, 0.32);
+        stage.render();
+        g.drawImage(stage.renderer.domElement, (i % cols) * size, Math.floor(i / cols) * size, size, size);
+      }
+      const blob = await new Promise((resolve) => sheet.toBlob(resolve, 'image/webp', 0.82));
+      if (!blob || blob.type !== 'image/webp') return null;
+      const url = this.apiUrl('turntable', item, { r: TURNTABLE.version });
+      const r = await fetch(url, { method: 'PUT', body: blob, credentials: 'same-origin' });
+      return r.ok ? url : null;
+    } finally {
+      stage.dispose();
+      disposeObject(object);
+    }
+  }
+
+  async sendModelSource(item, object, V) {
+    const st = await fetch(this.apiUrl('model', item), { credentials: 'same-origin' });
+    if (st.status !== 404) return;
+    const glb = await new V.GLTFExporter().parseAsync(object, { binary: true, onlyVisible: true });
+    await fetch(this.apiUrl('model-source', item), { method: 'PUT', body: new Blob([glb], { type: 'model/gltf-binary' }), credentials: 'same-origin' });
+  }
+
+  // ── models ──
+
+  // Load a model into a three.js object. On a Markport server the web-optimized
+  // GLB is used when it is ready; otherwise (and always locally) the original,
+  // read from the vault with its textures and .mtl/.bin files resolved next to it.
+  async loadModel(item, opts) {
+    const V = await this.three();
+    const T = V.THREE;
+    const vault = this.app.vault;
+    const ext = item.extension.toLowerCase();
+    const folder = parentPath(item.file);
+    const manager = new T.LoadingManager();
+    // Textures (OBJ/MTL, FBX, DAE) load after parse() returns: know when they are done.
+    let loading = false;
+    let settle;
+    const settled = new Promise((resolve) => { settle = resolve; });
+    manager.onStart = () => { loading = true; };
+    manager.onLoad = () => { loading = false; settle(); };
+    const draco = await this.dracoUrl();
+    manager.setURLModifier((url) => {
+      if (/draco_decoder\.js$/.test(url)) return draco;
+      if (!url.startsWith('vault:')) return url;
+      let rel = url.slice(6);
+      try { rel = decodeURIComponent(rel); } catch (_) { /* keep */ }
+      const f = this.findSibling(rel, folder);
+      return f ? vault.getResourcePath(f) : url;
+    });
+    const base = 'vault:' + (folder ? folder + '/' : '');
+    const gltfLoader = () => {
+      const l = new V.GLTFLoader(manager);
+      const d = new V.DRACOLoader(manager);
+      d.setDecoderPath('https://markport.invalid/draco/');
+      if (d.setDecoderConfig) d.setDecoderConfig({ type: 'js' });
+      l.setDRACOLoader(d);
+      l.setMeshoptDecoder(V.MeshoptDecoder);
+      return l;
+    };
+    const parseGltf = (buf, path) => new Promise((resolve, reject) => gltfLoader().parse(buf, path, (g) => resolve(g.scene), reject));
+
+    if (opts && opts.preferOptimized && this.server) {
+      try {
+        const r = await fetch(this.apiUrl('model', item), { credentials: 'same-origin' });
+        if (r.status === 200) {
+          const object = await parseGltf(await r.arrayBuffer(), '');
+          fixNormals(object);
+          return { object, optimized: true };
+        }
+      } catch (_) { /* fall back to the original */ }
+    }
+
+    const neutral = () => new T.MeshStandardMaterial({ color: 0xb9bdc6, roughness: 0.55, metalness: 0.05 });
+    let object;
+    if (ext === 'glb' || ext === 'gltf') {
+      object = await parseGltf(await vault.readBinary(item.file), base);
+    } else if (ext === 'obj') {
+      const text = await vault.read(item.file);
+      const loader = new V.OBJLoader(manager);
+      const lib = /^\s*mtllib\s+(.+?)\s*$/m.exec(text);
+      const mtlFile = lib && this.findSibling(lib[1], folder);
+      if (mtlFile) {
+        const mtl = new V.MTLLoader(manager).setResourcePath(base).parse(await vault.read(mtlFile), base);
+        mtl.preload();
+        loader.setMaterials(mtl);
+      }
+      object = loader.parse(text);
+    } else if (ext === 'fbx') {
+      object = new V.FBXLoader(manager).parse(await vault.readBinary(item.file), base);
+    } else if (ext === 'stl' || ext === 'ply') {
+      const buf = await vault.readBinary(item.file);
+      const geo = (ext === 'stl' ? new V.STLLoader(manager) : new V.PLYLoader(manager)).parse(buf);
+      const colors = geo.hasAttribute('color');
+      if (ext === 'ply' && !geo.index && !geo.hasAttribute('normal')) {
+        object = new T.Points(geo, new T.PointsMaterial({ size: 0.01, sizeAttenuation: true, vertexColors: colors, color: colors ? 0xffffff : 0xb9bdc6 }));
+      } else {
+        if (!geo.hasAttribute('normal')) geo.computeVertexNormals();
+        const m = neutral();
+        if (colors) m.vertexColors = true;
+        object = new T.Mesh(geo, m);
+      }
+    } else if (ext === '3mf') {
+      object = new V.ThreeMFLoader(manager).parse(await vault.readBinary(item.file));
+    } else if (ext === 'dae') {
+      object = new V.ColladaLoader(manager).parse(await vault.read(item.file), base).scene;
+    } else if (ext === 'usdz') {
+      object = await new V.USDLoader(manager).parse(await vault.readBinary(item.file));
+    } else {
+      throw new Error('Unsupported model format: .' + ext);
+    }
+    if (loading) await Promise.race([settled, new Promise((resolve) => setTimeout(resolve, 10e3))]);
+    fixNormals(object);
+    return { object, optimized: false };
+  }
+
+  // A file a model refers to: by its path relative to the model, else by
+  // name in the model's folder or below it (FBX files often carry the
+  // absolute path of the machine they were made on).
+  findSibling(rel, folder) {
+    const vault = this.app.vault;
+    const clean = String(rel).replace(/\\/g, '/').replace(/^\.\//, '');
+    const parts = [];
+    for (const p of clean.split('/')) {
+      if (!p || p === '.') continue;
+      if (p === '..') parts.pop(); else parts.push(p);
+    }
+    const direct = vault.getAbstractFileByPath(parts.join('/'));
+    if (direct instanceof obsidian.TFile) return direct;
+    const name = parts[parts.length - 1];
+    if (!name) return null;
+    const lower = name.toLowerCase();
+    const root = folder ? vault.getAbstractFileByPath(folder) : vault.getRoot();
+    let found = null;
+    const walk = (dir, depth) => {
+      for (const c of dir.children || []) {
+        if (found) return;
+        if (c instanceof obsidian.TFile && c.name.toLowerCase() === lower) found = c;
+        else if (c instanceof obsidian.TFolder && depth < 3) walk(c, depth + 1);
+      }
+    };
+    if (root) walk(root, 0);
+    return found;
+  }
+
+  // ── uploads ──
+
+  // Write one file into the vault, unchanged. Big files on a Markport server
+  // go up in resumable chunks instead of one request held in memory.
+  async write(file, path) {
+    const chunk = this.server && this.server.caps.uploadChunk;
+    if (!chunk || file.size <= chunk) {
+      await this.app.vault.createBinary(path, await file.arrayBuffer());
+      return;
+    }
+    const post = async (url, body) => {
+      const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), credentials: 'same-origin' });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.error || ('HTTP ' + r.status));
+      return j;
+    };
+    const start = await post('/api/media/upload/start', { vault: this.server.vault, path, size: file.size });
+    let offset = 0;
+    while (offset < file.size) {
+      const end = Math.min(file.size, offset + start.chunk);
+      let tries = 0;
+      for (;;) {
+        try {
+          const r = await fetch('/api/media/upload/chunk?id=' + start.id + '&offset=' + offset, { method: 'PUT', body: file.slice(offset, end), credentials: 'same-origin' });
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          break;
+        } catch (e) {
+          if (++tries >= 4) throw e;
+          await new Promise((res) => setTimeout(res, 500 * tries));
+        }
+      }
+      offset = end;
+      this.plugin.uploadProgress(path, offset / file.size);
+    }
+    await post('/api/media/upload/finish', { id: start.id });
+    // The server published the new file; wait until this window has seen it.
+    for (let i = 0; i < 100 && !this.app.vault.getAbstractFileByPath(path); i++) await new Promise((res) => setTimeout(res, 100));
+  }
+
+  destroy() {
+    for (const v of this.urls.values()) URL.revokeObjectURL(v.url);
+    this.urls.clear();
+    if (this._worker) this._worker.then((w) => w.terminate(), () => {});
+    if (this._draco) this._draco.then((u) => URL.revokeObjectURL(u), () => {});
+  }
+}
+
+// Meshes without usable normals (OBJ without "vn", STL exporters that write
+// zeros) render black: compute them.
+function fixNormals(object) {
+  object.traverse((o) => {
+    const g = o.isMesh && o.geometry;
+    if (!g || !g.getAttribute('position')) return;
+    const n = g.getAttribute('normal');
+    let ok = !!n;
+    if (n) {
+      ok = false;
+      for (let i = 0; i < Math.min(n.count, 64) && !ok; i++) ok = n.getX(i) !== 0 || n.getY(i) !== 0 || n.getZ(i) !== 0;
+    }
+    if (!ok) g.computeVertexNormals();
+  });
+}
+
+// Free a three.js object's GPU memory.
+function disposeObject(object) {
+  if (!object) return;
+  object.traverse((o) => {
+    if (o.geometry) o.geometry.dispose();
+    const mats = Array.isArray(o.material) ? o.material : o.material ? [o.material] : [];
+    for (const m of mats) {
+      for (const k of Object.keys(m)) if (m[k] && m[k].isTexture) m[k].dispose();
+      m.dispose();
+    }
+  });
+}
+
+// A three.js scene showing one model, framed, with soft studio light.
+// Used by the 3D viewer (on screen) and the turntable renderer (offscreen).
+class ModelStage {
+  constructor(V, host, opts) {
+    const T = V.THREE;
+    this.V = V;
+    this.T = T;
+    const o = opts || {};
+    this.renderer = new T.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: !!o.offscreen, powerPreference: o.offscreen ? 'low-power' : 'high-performance' });
+    this.renderer.setPixelRatio(o.offscreen ? 1 : Math.min(2, window.devicePixelRatio || 1));
+    this.renderer.setSize(o.width || 300, o.height || 300, !o.offscreen);
+    this.renderer.outputColorSpace = T.SRGBColorSpace;
+    this.renderer.toneMapping = T.ACESFilmicToneMapping;
+    this.renderer.toneMappingExposure = 1.05;
+    this.scene = new T.Scene();
+    const pmrem = new T.PMREMGenerator(this.renderer);
+    this.envTex = pmrem.fromScene(new V.RoomEnvironment(), 0.04).texture;
+    pmrem.dispose();
+    this.scene.environment = this.envTex;
+    this.scene.add(new T.HemisphereLight(0xffffff, 0x444450, 1.2));
+    const sun = new T.DirectionalLight(0xffffff, 1.6);
+    sun.position.set(3, 5, 4);
+    this.scene.add(sun);
+    this.camera = new T.PerspectiveCamera(35, (o.width || 300) / (o.height || 300), 0.01, 1000);
+    this.pivot = new T.Group();
+    this.scene.add(this.pivot);
+    this.radius = 1;
+    if (host) host.appendChild(this.renderer.domElement);
+  }
+
+  setObject(object) {
+    const T = this.T;
+    this.pivot.clear();
+    this.object = object;
+    const box = new T.Box3().setFromObject(object);
+    const size = box.getSize(new T.Vector3());
+    const center = box.getCenter(new T.Vector3());
+    object.position.sub(center);
+    this.pivot.add(object);
+    this.radius = Math.max(1e-3, size.length() / 2);
+    this.camera.near = this.radius / 100;
+    this.camera.far = this.radius * 100;
+    this.camera.updateProjectionMatrix();
+    this.orbit(Math.PI / 5, 0.3);
+  }
+
+  // Put the camera at an angle around the model (yaw, pitch in radians).
+  orbit(yaw, pitch) {
+    const d = this.radius / Math.sin((this.camera.fov * Math.PI) / 360) * 1.08;
+    this.camera.position.set(Math.sin(yaw) * Math.cos(pitch) * d, Math.sin(pitch) * d, Math.cos(yaw) * Math.cos(pitch) * d);
+    this.camera.lookAt(0, 0, 0);
+  }
+
+  resize(w, hgt) {
+    if (!(w > 0 && hgt > 0)) return;
+    this.renderer.setSize(w, hgt, true);
+    this.camera.aspect = w / hgt;
+    this.camera.updateProjectionMatrix();
+  }
+
+  render() { this.renderer.render(this.scene, this.camera); }
+
+  dispose() {
+    this.pivot.clear();
+    if (this.envTex) this.envTex.dispose();
+    this.renderer.dispose();
+    if (this.renderer.forceContextLoss) this.renderer.forceContextLoss();
+    this.renderer.domElement.remove();
+  }
+}
+
+// The interactive 3D viewer (Details and full screen): orbit, zoom, pan.
+// Renders only when something moves.
+class ModelViewer {
+  constructor(host, plugin, item, opts) {
+    this.plugin = plugin;
+    this.item = item;
+    this.opts = opts || {};
+    this.el = h('div', 'mpl-3d' + (this.opts.large ? ' is-large' : ''), host);
+    this.status = h('div', 'mpl-3d-status', this.el, 'Loading 3D model…');
+    this.dead = false;
+    this.start();
+  }
+
+  async start() {
+    try {
+      const media = this.plugin.media;
+      const V = await media.three();
+      if (this.dead) return;
+      const { object } = await media.loadModel(this.item, { preferOptimized: true });
+      if (this.dead) { disposeObject(object); return; }
+      const stage = this.stage = new ModelStage(V, this.el, { width: this.el.clientWidth || 300, height: this.el.clientHeight || 200 });
+      stage.setObject(object);
+      const controls = this.controls = new V.OrbitControls(stage.camera, stage.renderer.domElement);
+      controls.enableDamping = true;
+      controls.dampingFactor = 0.12;
+      controls.autoRotateSpeed = 1.4;
+      controls.autoRotate = !!this.opts.autoRotate;
+      controls.addEventListener('change', () => this.kick());
+      this.ro = new ResizeObserver(() => { stage.resize(this.el.clientWidth, this.el.clientHeight); this.kick(); });
+      this.ro.observe(this.el);
+      this.status.remove();
+      this.kick();
+      if (this.opts.onReady) this.opts.onReady(this);
+    } catch (e) {
+      if (this.dead) return;
+      this.status.textContent = 'Could not show this model: ' + ((e && e.message) || e);
+      this.status.classList.add('is-error');
+    }
+  }
+
+  // Render for a while (damping settles, auto-rotate keeps it going).
+  kick() {
+    this.until = performance.now() + 800;
+    if (this.raf) return;
+    const tick = () => {
+      this.raf = null;
+      if (this.dead || !this.stage) return;
+      this.controls.update();
+      this.stage.render();
+      if (this.controls.autoRotate || performance.now() < this.until) this.raf = requestAnimationFrame(tick);
+    };
+    this.raf = requestAnimationFrame(tick);
+  }
+
+  setAutoRotate(on) {
+    if (!this.controls) return;
+    this.controls.autoRotate = on;
+    this.kick();
+  }
+
+  reset() {
+    if (!this.stage) return;
+    this.controls.reset();
+    this.stage.orbit(Math.PI / 5, 0.3);
+    this.controls.target.set(0, 0, 0);
+    this.controls.update();
+    this.kick();
+  }
+
+  destroy() {
+    this.dead = true;
+    if (this.raf) cancelAnimationFrame(this.raf);
+    if (this.ro) this.ro.disconnect();
+    if (this.controls) this.controls.dispose();
+    if (this.stage) { disposeObject(this.stage.object); this.stage.dispose(); }
+    this.el.remove();
+  }
+}
+
+// Show a media item's picture in an <img>: right away when there is a URL,
+// else when decoding finishes; and for flipbooks and models with a
+// turntable, scrub with the pointer. Returns { img, setFrame, frames }.
+function mountMediaPicture(plugin, host, item, opts) {
+  const media = plugin.media;
+  const o = opts || {};
+  const w = o.width || THUMB_W;
+  const img = h('img', null, host);
+  img.alt = item.basename;
+  img.draggable = false;
+  img.decoding = 'async';
+  if (o.lazy) img.loading = 'lazy';
+  const state = { img, frames: 0, frame: 0, sheet: null };
+  const setSrc = (url) => {
+    if (url) { img.src = url; host.classList.remove('is-none'); } else host.classList.add('is-none');
+  };
+  const showImage = (it) => {
+    const q = media.quickSrc(it, w);
+    if (q) { setSrc(q); return; }
+    host.classList.add('is-loading');
+    media.src(it, w).then((u) => { host.classList.remove('is-loading'); setSrc(u); });
+  };
+  // Server thumbnail failed: fall back to the original when the browser can show it.
+  img.addEventListener('error', () => {
+    const it = item.kind === 'flipbook' ? item.frame(state.frame) : item;
+    const orig = it && media.originalSrc(it);
+    if (orig && img.src !== new URL(orig, location.href).href) img.src = orig;
+    else host.classList.add('is-none');
+  });
+
+  const setFrame = (i) => {
+    if (!state.frames) return;
+    const k = ((i % state.frames) + state.frames) % state.frames;
+    if (k === state.frame && state.started) return;
+    state.started = true;
+    state.frame = k;
+    if (state.flipbook) showImage(state.flipbook.frame(k));
+    else if (state.sheet) {
+      const cols = state.sheet.cols;
+      const rows = Math.ceil(state.frames / cols);
+      host.style.backgroundPosition = ((k % cols) / Math.max(1, cols - 1)) * 100 + '% ' + (Math.floor(k / cols) / Math.max(1, rows - 1)) * 100 + '%';
+    }
+    if (o.onFrame) o.onFrame(k, state.frames);
+  };
+  state.setFrame = setFrame;
+
+  const scrubbable = (flip) => {
+    state.flipbook = flip;
+    state.frames = flip.frames.length;
+    showImage(flip.frame(0));
+    host.classList.add('is-scrub');
+    if (o.scrub !== false) {
+      host.addEventListener('pointerenter', () => {
+        // Warm the cache so scrubbing is smooth (small thumbnails only).
+        if (state.warm) return;
+        state.warm = true;
+        for (let i = 1; i < Math.min(state.frames, 120); i++) {
+          const q = media.quickSrc(flip.frame(i), w);
+          if (q) { const im = new Image(); im.decoding = 'async'; im.src = q; }
+        }
+      });
+      host.addEventListener('pointermove', (e) => {
+        if (e.buttons) return;
+        const r = host.getBoundingClientRect();
+        setFrame(Math.floor(Math.max(0, Math.min(0.9999, (e.clientX - r.left) / r.width)) * state.frames));
+      });
+    }
+  };
+
+  if (item.kind === 'image') showImage(item);
+  else if (item.kind === 'flipbook') scrubbable(item);
+  else if (item.kind === 'model') {
+    host.classList.add('is-model');
+    media.turntable(item).then((tt) => {
+      if (!img.isConnected && !host.isConnected) return;
+      if (!tt) { host.classList.add('is-none'); return; }
+      if (tt.flipbook) { scrubbable(tt.flipbook); return; }
+      img.remove();
+      state.sheet = tt;
+      state.frames = tt.frames;
+      host.classList.add('is-sheet', 'is-scrub');
+      host.style.backgroundImage = 'url("' + tt.sheet + '")';
+      host.style.backgroundSize = (tt.cols * 100) + '% ' + (Math.ceil(tt.frames / tt.cols) * 100) + '%';
+      setFrame(0);
+      if (o.scrub !== false) {
+        host.addEventListener('pointermove', (e) => {
+          if (e.buttons) return;
+          const r = host.getBoundingClientRect();
+          setFrame(Math.floor(Math.max(0, Math.min(0.9999, (e.clientX - r.left) / r.width)) * state.frames));
+        });
+      }
+      if (o.onSheet) o.onSheet(tt);
+    });
+  }
+  return state;
+}
+
+// A short label for an item's kind: "3D · FBX", "FLIPBOOK · 24", "PSD".
+function kindLabel(item) {
+  if (item.kind === 'model') return '3D · ' + item.extension.toUpperCase();
+  if (item.kind === 'flipbook') return 'FLIPBOOK · ' + item.frames.length;
+  return item.extension.toUpperCase();
+}
+
+
+// Plays a flipbook: scrub bar, play/pause, speed; drag or wheel over the
+// picture to scrub. Used in full screen and in Details.
+class FlipbookPlayer {
+  constructor(host, plugin, item, opts) {
+    this.plugin = plugin;
+    this.item = item;
+    const o = this.opts = opts || {};
+    this.fps = o.fps || 12;
+    this.el = h('div', 'mpl-flip' + (o.compact ? ' is-compact' : ''), host);
+    this.stage = h('div', 'mpl-flip-stage', this.el);
+    this.pic = mountMediaPicture(plugin, this.stage, item, {
+      width: o.width || PREVIEW_W, scrub: false,
+      onFrame: (k, n) => { this.range.value = String(k); this.count.textContent = (k + 1) + ' / ' + n; },
+    });
+    const bar = h('div', 'mpl-flip-bar', this.el);
+    this.playBtn = dbutton(bar, 'play', 'Play (Space)', () => this.toggle());
+    this.range = h('input', 'mpl-flip-range', bar);
+    this.range.type = 'range';
+    this.range.min = '0';
+    this.range.max = String(item.frames.length - 1);
+    this.range.value = '0';
+    this.range.setAttribute('aria-label', 'Frame');
+    this.range.addEventListener('input', () => { this.stop(); this.pic.setFrame(Number(this.range.value)); });
+    this.count = h('span', 'mpl-flip-count mpl-mono', bar, '1 / ' + item.frames.length);
+    if (!o.compact) {
+      const sel = h('select', 'mpl-flip-fps dropdown', bar);
+      sel.setAttribute('aria-label', 'Frames per second');
+      for (const f of [6, 12, 24, 30, 60]) {
+        const opt = h('option', null, sel, f + ' fps');
+        opt.value = String(f);
+      }
+      sel.value = String(this.fps);
+      sel.addEventListener('change', () => { this.fps = Number(sel.value); if (this.timer) { this.stop(); this.play(); } });
+    }
+    this.pic.setFrame(0);
+
+    // Drag across the picture: one width = every frame once.
+    let drag = null;
+    this.stage.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0) return;
+      this.stop();
+      drag = { x: e.clientX, k: this.pic.frame, w: this.stage.clientWidth || 1 };
+      this.stage.setPointerCapture(e.pointerId);
+    });
+    this.stage.addEventListener('pointermove', (e) => {
+      if (!drag) return;
+      this.pic.setFrame(drag.k + Math.round((e.clientX - drag.x) / drag.w * item.frames.length));
+    });
+    const end = () => { drag = null; };
+    this.stage.addEventListener('pointerup', end);
+    this.stage.addEventListener('pointercancel', end);
+    this.stage.addEventListener('wheel', (e) => {
+      e.preventDefault();
+      this.stop();
+      this.step(e.deltaY > 0 || e.deltaX > 0 ? 1 : -1);
+    }, { passive: false });
+
+    // Decode every frame up front (bounded), so playing never stutters.
+    const media = plugin.media;
+    this.preload = [];
+    for (let i = 1; i < Math.min(item.frames.length, 240); i++) {
+      const q = media.quickSrc(item.frame(i), o.width || PREVIEW_W);
+      if (!q) continue;
+      const im = new Image();
+      im.decoding = 'async';
+      im.src = q;
+      this.preload.push(im);
+    }
+    if (o.autoplay) this.play();
+  }
+
+  step(d) { this.pic.setFrame(this.pic.frame + d); }
+
+  play() {
+    if (this.timer) return;
+    let last = performance.now();
+    const tick = (t) => {
+      this.timer = requestAnimationFrame(tick);
+      if (t - last >= 1000 / this.fps) {
+        last = t;
+        this.step(1);
+      }
+    };
+    this.timer = requestAnimationFrame(tick);
+    this.playBtn.replaceChildren();
+    dicon(this.playBtn, 'pause');
+    this.playBtn.setAttribute('aria-label', 'Pause (Space)');
+  }
+
+  stop() {
+    if (!this.timer) return;
+    cancelAnimationFrame(this.timer);
+    this.timer = null;
+    this.playBtn.replaceChildren();
+    dicon(this.playBtn, 'play');
+    this.playBtn.setAttribute('aria-label', 'Play (Space)');
+  }
+
+  toggle() { if (this.timer) this.stop(); else this.play(); }
+
+  destroy() {
+    this.stop();
+    this.preload.length = 0;
+    this.el.remove();
   }
 }
 
@@ -2010,14 +3155,14 @@ class ImageLibraryView extends obsidian.ItemView {
     const vault = this.app.vault;
     for (const ev of ['create', 'delete', 'modify']) {
       this.registerEvent(vault.on(ev, (f) => {
-        if (isImageFile(f) || f instanceof obsidian.TFolder) this.scheduleRefresh(ev === 'modify' ? f : null);
+        if (this.plugin.media.relevant(f)) this.scheduleRefresh(ev === 'modify' ? f : null);
       }));
     }
     this.registerEvent(vault.on('rename', (f, oldPath) => {
       if (this.selected.delete(oldPath)) this.selected.add(f.path);
       const fv = this.filter.kind === 'folder' ? this.filter.value : null;
       if (fv && (fv === oldPath || fv.startsWith(oldPath + '/'))) this.filter = { kind: 'folder', value: f.path + fv.slice(oldPath.length) };
-      if (isImageFile(f) || f instanceof obsidian.TFolder) this.scheduleRefresh();
+      if (this.plugin.media.relevant(f)) this.scheduleRefresh();
     }));
 
     this.resizeObs = new ResizeObserver(() => {
@@ -2051,6 +3196,8 @@ class ImageLibraryView extends obsidian.ItemView {
     if (this.storeUnsub) this.storeUnsub();
     if (this.board) this.board.destroy();
     if (this.floatMini) this.floatMini.destroy();
+    this.destroyDetailsWidget();
+    this.destroyFullWidget();
     clearTimeout(this.refreshTimer);
     clearTimeout(this.layoutTimer);
   }
@@ -2090,7 +3237,12 @@ class ImageLibraryView extends obsidian.ItemView {
     this.headingEl = head.createSpan({ cls: 'mpl-ptitle' });
     this.totalEl = head.createSpan({ cls: 'mpl-pcount' });
     head.createSpan({ cls: 'mpl-spacer' });
-    this.iconButton(head, 'image-plus', 'Import images…', () => this.fileInput.click());
+    this.iconButton(head, 'image-plus', 'Import images, models or a flipbook…', (e) => {
+      const menu = new obsidian.Menu();
+      menu.addItem((i) => i.setTitle('Import images or 3D models…').setIcon('image-plus').onClick(() => { this.importAsFlipbook = false; this.fileInput.click(); }));
+      menu.addItem((i) => i.setTitle('Import flipbook frames…').setIcon('film').onClick(() => { this.importAsFlipbook = true; this.fileInput.click(); }));
+      menu.showAtMouseEvent(e);
+    });
     this.iconButton(head, 'arrow-up-down', 'Sort and thumbnail size', (e) => this.viewMenu(e));
     this.gridMaxBtn = dbutton(head, 'fill', 'Fill window', () => this.maxPanel('grid'));
     dbutton(head, 'left', 'Minimize', () => this.togglePanel('grid'));
@@ -2101,12 +3253,13 @@ class ImageLibraryView extends obsidian.ItemView {
     this.emptyEl = this.scrollEl.createDiv({ cls: 'mpl-empty' });
     this.sentinel = this.scrollEl.createDiv({ cls: 'mpl-sentinel' });
     this.dropEl = main.createDiv({ cls: 'mpl-drop' });
-    this.fileInput = main.createEl('input', { attr: { type: 'file', multiple: '', accept: 'image/*' } });
+    this.fileInput = main.createEl('input', { attr: { type: 'file', multiple: '' } });
     this.fileInput.style.display = 'none';
     this.fileInput.addEventListener('change', () => {
       const files = [...this.fileInput.files];
       this.fileInput.value = '';
-      this.importFiles(files, this.importFolder());
+      this.importDropped(files, this.importAsFlipbook);
+      this.importAsFlipbook = false;
     });
     // Click on empty space clears the selection.
     this.scrollEl.addEventListener('click', (e) => {
@@ -2298,6 +3451,8 @@ class ImageLibraryView extends obsidian.ItemView {
     switch (filter.kind) {
       case 'recent': return this.added(f) >= Date.now() - 7 * DAY;
       case 'untagged': return !(this.info(f).tags.length);
+      case 'models': return f.kind === 'model';
+      case 'flipbooks': return f.kind === 'flipbook';
       case 'folder': return f.path.startsWith(filter.value + '/');
       case 'tag': return hasTag(this.info(f).tags, filter.value);
       case 'smart': {
@@ -2365,10 +3520,12 @@ class ImageLibraryView extends obsidian.ItemView {
   filterLabel(f) {
     if (f.kind === 'recent') return 'Added this week';
     if (f.kind === 'untagged') return 'Untagged';
+    if (f.kind === 'models') return '3D models';
+    if (f.kind === 'flipbooks') return 'Flipbooks';
     if (f.kind === 'folder') return f.value.split('/').pop();
     if (f.kind === 'tag') return '#' + f.value;
     if (f.kind === 'smart') return f.value;
-    return 'All images';
+    return 'All items';
   }
 
   setFilter(f) {
@@ -2416,9 +3573,10 @@ class ImageLibraryView extends obsidian.ItemView {
     sections.push({
       title: 'Library',
       rows: [
-        { label: 'All images', count: all.length, filter: { kind: 'all' } },
+        { label: 'All items', count: all.length, filter: { kind: 'all' } },
         { label: 'Untagged', count: all.filter((f) => !this.info(f).tags.length).length, filter: { kind: 'untagged' } },
-      ],
+      ].concat(all.some((f) => f.kind === 'model') ? [{ label: '3D models', count: all.filter((f) => f.kind === 'model').length, filter: { kind: 'models' }, color: '#47525E', initial: '3D' }] : [])
+        .concat(all.some((f) => f.kind === 'flipbook') ? [{ label: 'Flipbooks', count: all.filter((f) => f.kind === 'flipbook').length, filter: { kind: 'flipbooks' }, color: '#5C3F4F' }] : []),
     });
 
     const folderRows = [];
@@ -2618,7 +3776,7 @@ class ImageLibraryView extends obsidian.ItemView {
       if (raw) {
         let paths = [];
         try { paths = JSON.parse(raw); } catch (_) { /* ignore */ }
-        const files = paths.map((p) => this.app.vault.getAbstractFileByPath(p)).filter(isImageFile);
+        const files = paths.map((p) => this.plugin.media.item(p)).filter(Boolean);
         this.moveFiles(files, folder);
       } else if (e.dataTransfer.files.length) {
         this.importFiles([...e.dataTransfer.files], folder);
@@ -2655,7 +3813,7 @@ class ImageLibraryView extends obsidian.ItemView {
       let k = 0;
       for (let i = 1; i < n; i++) if (heights[i] < heights[k] - 1) k = i;
       cols[k].appendChild(this.card(f));
-      heights[k] += colW / (this.aspects.get(f.path) || 4 / 3) + GAP;
+      heights[k] += colW / (f.kind === 'model' ? 1 : (this.aspects.get(f.path) || 4 / 3)) + GAP;
     }
     this.gridEl.replaceChildren(frag);
 
@@ -2681,27 +3839,29 @@ class ImageLibraryView extends obsidian.ItemView {
     const known = this.cards.get(f);
     if (known && known.path === f.path && known.mtime === f.stat.mtime) return known.el;
 
+    const media = this.plugin.media;
     const el = document.createElement('div');
-    el.className = 'mpl-card';
+    el.className = 'mpl-card mpl-kind-' + f.kind;
     el.draggable = true;
     const thumb = el.createDiv({ cls: 'mpl-thumb' });
-    const a = this.aspects.get(f.path);
+    const a = f.kind === 'model' ? 1 : this.aspects.get(f.path);
     if (a) thumb.style.aspectRatio = String(a);
-    const img = thumb.createEl('img', { attr: { loading: 'lazy', decoding: 'async', alt: f.basename, draggable: 'false' } });
-    img.addEventListener('load', () => {
-      this.gotSize(f, img.naturalWidth, img.naturalHeight);
+    // Only an original's pixel size is the image's size (thumbnails are smaller).
+    const original = f.kind === 'image' && !media.server && media.support(f) === 'web';
+    const pic = mountMediaPicture(this.plugin, thumb, f, { width: THUMB_W, lazy: true });
+    pic.img.addEventListener('load', () => {
+      const im = pic.img;
+      if (!(im.naturalWidth > 0)) return;
+      if (f.kind !== 'model') this.gotSize(f, im.naturalWidth, im.naturalHeight, original && (!pic.frames || pic.frame === 0));
       // Colors make "color:teal" searches and folder chips work.
       const m = this.meta(f.path);
-      if (!m || !m.colors) {
-        const colors = this.computeColors(img);
+      if ((!m || !m.colors) && (!pic.frames || pic.frame === 0)) {
+        const colors = this.computeColors(im);
         if (colors.length) this.plugin.setMeta(f.path, { colors });
       }
     });
-    img.addEventListener('error', () => {
-      thumb.addClass('is-broken');
-      obsidian.setIcon(thumb.createDiv({ cls: 'mpl-broken-icon' }), 'image-off');
-    });
-    img.src = this.app.vault.getResourcePath(f);
+    thumb.createDiv({ cls: 'mpl-none', text: f.kind === 'model' ? '3D model' : f.extension.toUpperCase() });
+    if (f.kind !== 'image' || media.support(f) !== 'web') el.createSpan({ cls: 'mpl-kind', text: kindLabel(f) });
     el.createSpan({ cls: 'mpl-badge', text: 'on board' });
     const acts = el.createDiv({ cls: 'mpl-card-acts' });
     const full = dbutton(acts, 'fill', 'Full screen (F)', () => { this.selectOnly(f, true); this.openFullGrid(f); });
@@ -2721,18 +3881,22 @@ class ImageLibraryView extends obsidian.ItemView {
     return el;
   }
 
-  gotSize(f, w, hgt) {
+  // An item's aspect ratio is known (from its thumbnail): lay out to it. When
+  // `original` the pixels are the original's, so they are its size too.
+  gotSize(f, w, hgt, original) {
     if (!(w > 0 && hgt > 0)) return;
     const a = clampAspect(w / hgt);
     const prev = this.aspects.get(f.path);
     this.aspects.set(f.path, a);
-    this.dims.set(f.path, [w, hgt]);
+    if (original) {
+      this.dims.set(f.path, [w, hgt]);
+      const m = this.meta(f.path);
+      if (!m || m.w !== w || m.h !== hgt) this.plugin.setMeta(f.path, { w, h: hgt });
+    }
     const entry = this.cards.get(f);
     if (entry) entry.thumb.style.aspectRatio = String(a);
-    const m = this.meta(f.path);
-    if (!m || m.w !== w || m.h !== hgt) this.plugin.setMeta(f.path, { w, h: hgt });
     if (!prev || Math.abs(prev - a) / a > 0.02) this.scheduleLayout();
-    if (this.detailsOpen) this.paintDims(f);
+    if (this.detailsOpen && original) this.paintDims(f);
   }
 
   // -- selection ------------------------------------------------------------
@@ -2886,12 +4050,41 @@ class ImageLibraryView extends obsidian.ItemView {
     const stage = el.createDiv({ cls: 'mpl-full-stage' });
     const prev = dbutton(stage, 'prev', 'Previous image (←)', () => this.stepFull(-1), 'mpl-full-nav');
     const frame = stage.createDiv({ cls: 'mpl-full-frame' });
-    const img = frame.createEl('img', { attr: { alt: f.basename } });
-    img.src = this.app.vault.getResourcePath(f);
-    img.addEventListener('dblclick', () => this.closeFull());
+    this.destroyFullWidget();
+    let hint = 'Esc or F to close · ← → to step · I details';
+    if (f.kind === 'model') {
+      const viewer = this.fullWidget = new ModelViewer(frame, this.plugin, f, { large: true });
+      const tools = createDiv({ cls: 'mpl-full-tools' });
+      const spin = dbutton(tools, 'rotate', 'Auto-rotate', () => { spin.toggleClass('is-active', !spin.hasClass('is-active')); viewer.setAutoRotate(spin.hasClass('is-active')); });
+      dbutton(tools, 'reset', 'Reset view', () => viewer.reset());
+      top.insertBefore(tools, top.querySelector('.mpl-spacer').nextSibling);
+      hint = 'Drag to orbit · right-drag to pan · wheel to zoom · Esc to close · ← → to step';
+    } else if (f.kind === 'flipbook') {
+      this.fullWidget = new FlipbookPlayer(frame, this.plugin, f, { width: PREVIEW_W });
+      hint = 'Space play · , . or wheel or drag to scrub · ← → next item · Esc to close';
+    } else {
+      const img = frame.createEl('img', { attr: { alt: f.basename } });
+      const media = this.plugin.media;
+      const orig = media.originalSrc(f);
+      if (orig) img.src = orig;
+      else {
+        frame.addClass('is-loading');
+        media.src(f, PREVIEW_W).then((u) => {
+          frame.removeClass('is-loading');
+          if (u) img.src = u;
+          else frame.createDiv({ cls: 'mpl-full-none', text: 'This ' + f.extension.toUpperCase() + ' file cannot be shown here' + (media.server ? '.' : ' (a Markport server can show more formats).') });
+        });
+      }
+      img.addEventListener('dblclick', () => this.closeFull());
+    }
     const next = dbutton(stage, 'next', 'Next image (→)', () => this.stepFull(1), 'mpl-full-nav');
     if (list.length < 2) { prev.disabled = true; next.disabled = true; }
-    el.createDiv({ cls: 'mpl-full-hint mpl-mono mpl-muted', text: 'Esc or F to close · ← → to step · I details' });
+    el.createDiv({ cls: 'mpl-full-hint mpl-mono mpl-muted', text: hint });
+  }
+
+  destroyFullWidget() {
+    if (this.fullWidget) this.fullWidget.destroy();
+    this.fullWidget = null;
   }
 
   stepFull(d) {
@@ -2905,6 +4098,7 @@ class ImageLibraryView extends obsidian.ItemView {
   closeFull() {
     if (!this.full) return;
     this.full = null;
+    this.destroyFullWidget();
     this.fullEl.removeClass('is-open');
     this.fullEl.empty();
     if (this.focusIn === 'board') this.board.el.focus({ preventScroll: true });
@@ -2919,6 +4113,12 @@ class ImageLibraryView extends obsidian.ItemView {
   onFullKey(e) {
     e.stopPropagation();
     const k = e.key;
+    const player = this.fullWidget instanceof FlipbookPlayer ? this.fullWidget : null;
+    if (player && (k === ' ' || k === ',' || k === '.')) {
+      e.preventDefault();
+      if (k === ' ') player.toggle(); else { player.stop(); player.step(k === '.' ? 1 : -1); }
+      return;
+    }
     if (k === 'Escape' || k === 'f' || k === 'F' || k === ' ') { e.preventDefault(); this.closeFull(); }
     else if (k === 'ArrowRight') { e.preventDefault(); this.stepFull(1); }
     else if (k === 'ArrowLeft') { e.preventDefault(); this.stepFull(-1); }
@@ -2929,16 +4129,19 @@ class ImageLibraryView extends obsidian.ItemView {
 
   // Not open(): that name is View.open(containerEl), which Obsidian calls to attach the view.
   openImage(f, how) {
-    this.app.workspace.getLeaf(how === 'split' ? 'split' : 'tab').openFile(f);
+    // A flipbook is a folder: there is no file to open, so show it full screen.
+    if (!(f.file instanceof obsidian.TFile)) { this.openFullGrid(f); return; }
+    this.app.workspace.getLeaf(how === 'split' ? 'split' : 'tab').openFile(f.file);
   }
 
   embedLink(f) {
-    return '!' + this.app.fileManager.generateMarkdownLink(f, '');
+    // A flipbook embeds as its first frame.
+    return '!' + this.app.fileManager.generateMarkdownLink(f.kind === 'flipbook' ? f.frames[0] : f.file, '');
   }
 
   reveal(f) {
     const fe = this.app.internalPlugins && this.app.internalPlugins.getPluginById && this.app.internalPlugins.getPluginById('file-explorer');
-    if (fe && fe.instance && fe.instance.revealInFolder) fe.instance.revealInFolder(f);
+    if (fe && fe.instance && fe.instance.revealInFolder) fe.instance.revealInFolder(f.file || f);
     else new obsidian.Notice(f.path);
   }
 
@@ -2959,8 +4162,10 @@ class ImageLibraryView extends obsidian.ItemView {
     if (files.length === 1) {
       menu.addItem((i) => i.setTitle('Full screen').setIcon('maximize-2').onClick(() => this.openFullGrid(f)));
       menu.addItem((i) => i.setTitle('Details').setIcon('info').onClick(() => this.openDetails()));
-      menu.addItem((i) => i.setTitle('Open').setIcon('image').onClick(() => this.openImage(f)));
-      menu.addItem((i) => i.setTitle('Open to the right').setIcon('separator-vertical').onClick(() => this.openImage(f, 'split')));
+      if (f.file instanceof obsidian.TFile) {
+        menu.addItem((i) => i.setTitle('Open').setIcon('image').onClick(() => this.openImage(f)));
+        menu.addItem((i) => i.setTitle('Open to the right').setIcon('separator-vertical').onClick(() => this.openImage(f, 'split')));
+      }
       menu.addSeparator();
       menu.addItem((i) => i.setTitle('Copy embed link').setIcon('link').onClick(() => this.copy(this.embedLink(f), 'embed link')));
       menu.addItem((i) => i.setTitle('Reveal in navigation').setIcon('folder-open').onClick(() => this.reveal(f)));
@@ -3020,7 +4225,7 @@ class ImageLibraryView extends obsidian.ItemView {
       for (const f of files) {
         if (parentPath(f) === folder) continue;
         const target = uniquePath(folder, f.name, (p) => !!this.app.vault.getAbstractFileByPath(p));
-        await this.app.fileManager.renameFile(f, target);
+        await this.app.fileManager.renameFile(f.file, target);
         moved++;
       }
     } catch (e) {
@@ -3034,8 +4239,8 @@ class ImageLibraryView extends obsidian.ItemView {
     new ConfirmModal(this.app, 'Delete ' + (files.length === 1 ? 'image' : 'images'), 'Move ' + what + ' to the trash?', 'Delete', async () => {
       for (const f of files) {
         try {
-          if (this.app.fileManager.trashFile) await this.app.fileManager.trashFile(f);
-          else await this.app.vault.trash(f, true);
+          if (this.app.fileManager.trashFile) await this.app.fileManager.trashFile(f.file);
+          else await this.app.vault.trash(f.file, true);
         } catch (e) {
           new obsidian.Notice('Could not delete ' + f.name + ': ' + ((e && e.message) || e));
         }
@@ -3078,13 +4283,26 @@ class ImageLibraryView extends obsidian.ItemView {
       this.dropEl.removeClass('is-visible');
       if (!fromComputer(e)) return;
       e.preventDefault();
-      this.importFiles([...e.dataTransfer.files], this.importFolder());
+      this.importDropped([...e.dataTransfer.files]);
     });
   }
 
-  async importFiles(files, folder, keepSelection) {
+  // Several numbered images at once look like frames: offer a flipbook.
+  importDropped(files, asFlipbook) {
+    const F = this.plugin.media.F;
+    const images = files.filter((f) => F.kindOf(f.name) === 'image');
+    const ask = asFlipbook || (images.length === files.length && looksLikeSequence(images.map((f) => f.name)));
+    if (!ask) { this.importFiles(files, this.importFolder()); return; }
+    const guess = images.length ? images[0].name.replace(/\.[^.]+$/, '').replace(/[\s_.-]*\d+$/, '') : '';
+    new FlipbookImportModal(this.app, images.length, guess, asFlipbook, (choice, name) => {
+      if (choice === 'flipbook') this.importFiles(images, this.importFolder(), false, { flipbook: true, name });
+      else if (choice === 'separate') this.importFiles(files, this.importFolder());
+    }).open();
+  }
+
+  async importFiles(files, folder, keepSelection, opts) {
     const tag = this.filter.kind === 'tag' ? this.filter.value : null;
-    const done = await this.plugin.importFiles(files, folder, tag);
+    const done = await this.plugin.importFiles(files, folder, tag, opts);
     if (done.length && !keepSelection) {
       this.takeFocus('grid');
       this.selected = new Set(done);
@@ -3271,11 +4489,18 @@ class ImageLibraryView extends obsidian.ItemView {
   renderDetails() {
     if (!this.built) return;
     const el = this.detailsEl;
+    const files = this.detailsOpen ? this.targets() : [];
+    // Same item as before (a tag or note changed): keep its 3D viewer or
+    // player instead of loading the model again.
+    if (this.detailsWidget && files.length === 1 && this.detailsWidget.item === files[0]) {
+      this.keptWidget = this.detailsWidget;
+      this.keptWidget.el.remove();
+      this.detailsWidget = null;
+    } else this.destroyDetailsWidget();
     el.empty();
     this.tagsEl = null;
     this.dimsEl = null;
     this.picking = false;
-    const files = this.detailsOpen ? this.targets() : [];
     if (!files.length) {
       this.detailsOpen = false;
       el.removeClass('is-open');
@@ -3290,7 +4515,7 @@ class ImageLibraryView extends obsidian.ItemView {
     el.createDiv({ cls: 'mpl-mono mpl-muted', text: formatBytes(files.reduce((n, f) => n + f.stat.size, 0)) + ' in total' });
     const stack = el.createDiv({ cls: 'mpl-stack' });
     for (const f of files.slice(0, 9)) {
-      stack.createEl('img', { attr: { src: this.app.vault.getResourcePath(f), alt: f.basename, loading: 'lazy' } });
+      mountMediaPicture(this.plugin, stack.createDiv({ cls: 'mpl-stack-item' }), f, { width: THUMB_W, scrub: false });
     }
     const actions = el.createDiv({ cls: 'mpl-actions' });
     this.action(actions, 'tag', 'Add tag', () => this.promptTag(files));
@@ -3320,22 +4545,43 @@ class ImageLibraryView extends obsidian.ItemView {
 
   inspectOne(el, f) {
     const m = this.meta(f.path) || {};
-    const preview = el.createDiv({ cls: 'mpl-dpreview', attr: { role: 'button', tabindex: '0', 'aria-label': 'Open full screen' } });
-    const img = preview.createEl('img', { attr: { alt: f.basename, draggable: 'false' } });
-    img.addEventListener('load', () => {
-      this.gotSize(f, img.naturalWidth, img.naturalHeight);
-      if (!m.colors) {
-        const colors = this.computeColors(img);
-        if (colors.length) { this.plugin.setMeta(f.path, { colors }); this.paintPalette(palette, colors); }
-      }
-    });
-    img.src = this.app.vault.getResourcePath(f);
-    preview.addEventListener('click', (e) => {
-      if (this.picking) { this.sampleAt(img, e); return; }
-      this.fullFromDetails(f);
-    });
+    const media = this.plugin.media;
+    const preview = el.createDiv({ cls: 'mpl-dpreview mpl-kind-' + f.kind, attr: { role: 'button', tabindex: '0', 'aria-label': 'Open full screen' } });
+    let img = null;
+    const kept = this.keptWidget && this.keptWidget.item === f ? this.keptWidget : null;
+    this.keptWidget = null;
+    if (f.kind === 'model') {
+      // A live viewer: drag to orbit, wheel to zoom.
+      if (kept) { preview.appendChild(kept.el); this.detailsWidget = kept; } else this.detailsWidget = new ModelViewer(preview, this.plugin, f, {});
+      preview.removeAttribute('role');
+      preview.addClass('is-live');
+    } else if (f.kind === 'flipbook') {
+      if (kept) { preview.appendChild(kept.el); this.detailsWidget = kept; } else this.detailsWidget = new FlipbookPlayer(preview, this.plugin, f, { width: 1024, compact: true });
+      img = this.detailsWidget.pic.img;
+      preview.removeAttribute('role');
+      preview.addClass('is-live');
+    } else {
+      const pic = mountMediaPicture(this.plugin, preview, f, { width: 1024 });
+      img = pic.img;
+      preview.createDiv({ cls: 'mpl-none', text: f.extension.toUpperCase() });
+      preview.addEventListener('click', (e) => {
+        if (this.picking) { this.sampleAt(img, e); return; }
+        this.fullFromDetails(f);
+      });
+    }
+    if (img) {
+      img.addEventListener('load', () => {
+        if (!m.colors) {
+          const colors = this.computeColors(img);
+          if (colors.length) { this.plugin.setMeta(f.path, { colors }); this.paintPalette(palette, colors); }
+        }
+      });
+    }
     preview.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); this.fullFromDetails(f); } });
     this.previewEl = preview;
+    this.previewImg = img;
+    // The original's size, from the server or a decode, when not known yet.
+    if (!this.plugin.dims(f.path)) media.info(f).then((d) => { if (d) { this.dims.set(f.path, [d.width, d.height]); this.paintDims(f); } });
 
     // The name, renamed in place (the extension stays).
     const nameBox = el.createDiv({ cls: 'mpl-dname' });
@@ -3352,7 +4598,7 @@ class ImageLibraryView extends obsidian.ItemView {
         name.value = f.basename;
         return;
       }
-      await this.app.fileManager.renameFile(f, target);
+      await this.app.fileManager.renameFile(f.file, target);
     };
     name.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') { e.preventDefault(); name.blur(); }
@@ -3429,7 +4675,7 @@ class ImageLibraryView extends obsidian.ItemView {
       } catch (_) { /* cancelled */ }
       return;
     }
-    if (!this.previewEl) return;
+    if (!this.previewEl || !this.previewImg) { new obsidian.Notice('This browser has no color picker for 3D models'); return; }
     this.picking = true;
     this.previewEl.addClass('is-picking');
     new obsidian.Notice('Click the preview to pick a color');
@@ -3459,7 +4705,15 @@ class ImageLibraryView extends obsidian.ItemView {
   paintDims(f) {
     if (!this.dimsEl) return;
     const d = this.dims.get(f.path) || this.plugin.dims(f.path);
-    this.dimsEl.setText((d ? d[0] + ' × ' + d[1] + ' · ' : '') + f.extension.toUpperCase() + ' · ' + formatBytes(f.stat.size));
+    const what = f.kind === 'flipbook' ? f.frames.length + ' frames' : f.kind === 'model' ? '3D · ' + f.extension.toUpperCase() : f.extension.toUpperCase();
+    this.dimsEl.setText((d && f.kind !== 'model' ? d[0] + ' × ' + d[1] + ' · ' : '') + what + ' · ' + formatBytes(f.stat.size));
+  }
+
+  destroyDetailsWidget() {
+    if (this.detailsWidget) this.detailsWidget.destroy();
+    if (this.keptWidget) this.keptWidget.destroy();
+    this.detailsWidget = null;
+    this.keptWidget = null;
   }
 
   paintTags(f) {
@@ -3548,6 +4802,11 @@ class MarkportClipperPlugin extends obsidian.Plugin {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
     this.initLibrary();
     this.libraryViews = new Set();
+    this.media = new MediaLibrary(this);
+    await this.media.init();
+    for (const ev of ['create', 'delete', 'rename', 'modify']) {
+      this.registerEvent(this.app.vault.on(ev, (f) => { if (this.media.relevant(f)) this.media.invalidate(); }));
+    }
     this.stores = new Map();        // board path -> BoardStore
     this.boardIndex = null;         // board path -> Set(image paths), built on first use
     this.addSettingTab(new ClipperSettingTab(this.app, this));
@@ -3568,7 +4827,7 @@ class MarkportClipperPlugin extends obsidian.Plugin {
     this.registerEvent(this.app.vault.on('rename', (file, oldPath) => {
       if (renameLibraryKeys(this.settings.library, oldPath, file.path)) this.saveLibrarySoon();
       if (isCanvasFile(file)) this.boardRenamed(oldPath, file.path);
-      else if (isImageFile(file) || file instanceof obsidian.TFolder) this.relinkBoards(oldPath, file.path);
+      else if (this.media.relevant(file)) this.relinkBoards(oldPath, file.path);
     }));
     this.registerEvent(this.app.vault.on('delete', (file) => {
       if (dropLibraryKeys(this.settings.library, file.path)) this.saveLibrarySoon();
@@ -3674,11 +4933,14 @@ class MarkportClipperPlugin extends obsidian.Plugin {
     }, 800);
   }
 
-  allImages() { return this.app.vault.getFiles().filter(isImageFile); }
+  // Every media item: images, 3D models and flipbooks (see MediaLibrary).
+  allImages() { return this.media.all(); }
 
   imageInfo(f) {
     const m = this.settings.library[f.path] || {};
-    return { path: f.path, tags: m.tags || [], note: m.note || '', source: m.source || '', title: m.title || '', colors: m.colors || [] };
+    // Searching "3d", "model" or "flipbook" finds those kinds (the path has the extension).
+    const kind = f.kind === 'model' ? '3d model' : f.kind === 'flipbook' ? 'flipbook' : '';
+    return { path: f.path, tags: m.tags || [], note: m.note || '', source: m.source || '', title: m.title || '', colors: m.colors || [], kind };
   }
 
   added(f) {
@@ -3701,31 +4963,70 @@ class MarkportClipperPlugin extends obsidian.Plugin {
   }
 
   // Write image files from the computer into the vault. Returns the new paths.
-  async importFiles(files, folder, tag) {
-    const images = files.filter((f) => /^image\//.test(f.type) || IMAGE_EXTS.has((f.name.split('.').pop() || '').toLowerCase()));
-    if (!images.length) {
-      if (files.length) new obsidian.Notice('Only images can be imported here');
+  // Copy files from the computer into the vault, exactly as they are:
+  // images, 3D models (with the .mtl/.bin/texture files dropped alongside),
+  // or - with opts.flipbook - frames into a new "<name>.flipbook" folder.
+  // Returns the paths of the library items created.
+  async importFiles(files, folder, tag, opts) {
+    const o = opts || {};
+    const F = this.media.F;
+    const kind = (f) => F.kindOf(f.name) || (/^image\//.test(f.type) ? 'image' : '');
+    const hasModel = files.some((f) => kind(f) === 'model');
+    const sidecar = (f) => hasModel && F.MODEL_SIDECAR.includes(F.extOf(f.name));
+    const accepted = files.filter((f) => (o.flipbook ? kind(f) === 'image' : kind(f) || sidecar(f)));
+    if (!accepted.length) {
+      if (files.length) new obsidian.Notice(o.flipbook ? 'Flipbook frames must be images' : 'Only images and 3D models can be imported here');
       return [];
     }
     const vault = this.app.vault;
     const exists = (p) => !!vault.getAbstractFileByPath(p);
     const done = [];
+    let target = folder;
     try {
       await this.ensureFolder(folder);
-      for (const file of images) {
+      if (o.flipbook) {
+        const name = sanitizeName(o.name || '') || 'Flipbook';
+        target = uniquePath(folder, name + F.FLIPBOOK_SUFFIX, exists);
+        await vault.createFolder(target);
+      }
+      const total = accepted.reduce((n, f) => n + f.size, 0);
+      let sent = 0;
+      for (const file of accepted) {
         const dot = file.name.lastIndexOf('.');
         const ext = (dot > 0 ? file.name.slice(dot + 1) : extFromMime(file.type) || 'png').toLowerCase();
-        const base = sanitizeName(dot > 0 ? file.name.slice(0, dot) : file.name) || 'image';
-        const p = uniquePath(folder, base + '.' + ext, exists);
-        await vault.createBinary(p, await file.arrayBuffer());
-        this.setMeta(p, Object.assign({ added: Date.now() }, tag ? { tags: [tag] } : {}));
-        done.push(p);
+        const base = sanitizeName(dot > 0 ? file.name.slice(0, dot) : file.name) || 'file';
+        // Models refer to their textures by name: keep names as they are inside a flipbook or model set.
+        const p = uniquePath(target, base + '.' + ext, exists);
+        this.uploadProgress(p, total ? sent / total : 0);
+        await this.media.write(file, p);
+        sent += file.size;
+        if (!o.flipbook && kind(file)) {
+          this.setMeta(p, Object.assign({ added: Date.now() }, tag ? { tags: [tag] } : {}));
+          done.push(p);
+        }
+      }
+      if (o.flipbook) {
+        this.setMeta(target, Object.assign({ added: Date.now() }, tag ? { tags: [tag] } : {}));
+        done.push(target);
       }
     } catch (e) {
       new obsidian.Notice('Import failed: ' + ((e && e.message) || e));
+    } finally {
+      this.uploadProgress(null);
     }
-    if (done.length) new obsidian.Notice('Imported ' + done.length + (done.length === 1 ? ' image' : ' images') + ' into ' + (folder || 'the vault root'));
+    this.media.invalidate();
+    if (done.length) {
+      const what = o.flipbook ? 'a flipbook of ' + accepted.length + ' frames' : done.length + (done.length === 1 ? ' item' : ' items');
+      new obsidian.Notice('Imported ' + what + ' into ' + (folder || 'the vault root'));
+    }
     return done;
+  }
+
+  // Big imports: progress in the status bar. path null = done.
+  uploadProgress(path, fraction) {
+    if (!this.statusEl) return;
+    if (path == null) { this.updateStatus(); return; }
+    this.statusEl.setText('Importing ' + path.split('/').pop() + (fraction > 0 ? ' · ' + Math.round(fraction * 100) + '%' : '…'));
   }
 
   async openLibrary(boardPath) {
@@ -3892,6 +5193,7 @@ class MarkportClipperPlugin extends obsidian.Plugin {
 
   onunload() {
     for (const s of this.stores.values()) s.flush();
+    if (this.media) this.media.destroy();
     if (this.pipWindow) { try { this.pipWindow.close(); } catch (_) { /* gone */ } }
     if (this.libraryTimer) {
       clearTimeout(this.libraryTimer);
@@ -4109,5 +5411,5 @@ module.exports.helpers = {
   generateKey, checkRequest, BASE_PORT, PORT_COUNT,
   formatBytes, normalizeTag, parseQuery, matchesQuery, renameLibraryKeys, dropLibraryKeys, dominantColors,
   hexToRgb, colorTarget, parseCanvas, serializeCanvas, canvasImagePaths, renameInCanvas, boxAround, fitView,
-  simplifyPoints, strokePath, canvasColor, boardName,
+  simplifyPoints, strokePath, canvasColor, boardName, looksLikeSequence, MediaItem,
 };

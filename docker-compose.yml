@@ -15,6 +15,7 @@ services:
       args:
         OBSIDIAN_VERSION: ${OBSIDIAN_VERSION:-1.12.7}
         INSTALL_CLAUDE_CODE: ${MARKPORT_NODE_BRIDGE:-false}
+        INSTALL_IMAGEMAGICK: ${MARKPORT_IMAGEMAGICK:-true}
     image: markport:local
     # Local-only image: never pull it from a registry, always build it here.
     # Without this, Portainer's "Re-pull image" tries Docker Hub and fails.
@@ -33,6 +34,9 @@ services:
       # can open the site run commands in this container - only with an
       # authenticating reverse proxy in front. See the server README.
       MARKPORT_NODE_BRIDGE: ${MARKPORT_NODE_BRIDGE:-false}
+      # Image library cache (thumbnails, previews, web-optimized 3D models),
+      # in /data/media-cache - never inside a vault. Size cap in MB.
+      MARKPORT_MEDIA_CACHE_MB: ${MARKPORT_MEDIA_CACHE_MB:-5120}
     volumes:
       - ${MARKPORT_DATA:-markport-data}:/data
     # If your proxy runs as a container on a shared Docker network instead of

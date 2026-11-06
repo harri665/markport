@@ -1,6 +1,7 @@
 /**
  * Public share pages, /s/<id>/...
  *
+ *   (<id> is the share id or its custom link)
  *   GET  /s/<id>                 file share: the note; folder share: its index
  *   GET  /s/<id>/n/<path>        a note (or subfolder) inside a folder share
  *   GET  /s/<id>/raw/<path>      a file inside the share (images, PDFs, ...),
@@ -26,18 +27,21 @@ const path = require('path');
 const { vaultIndex, LINKED, ext } = require('./scope');
 const { renderNote, escapeHtml, encodePath, basenameNoMd } = require('./render');
 const { shell, messagePage, unlockPage, pageHeaders } = require('./html');
-const { verifyPassword } = require('./store');
+const { verifyPassword, ShareStore } = require('./store');
+const { createLimiter } = require('../auth');
+
+const basePath = (share) => ShareStore.basePath(share);
 
 const MAX_NOTE_BYTES = 5 * 1024 * 1024;
 const MAX_TREE_ENTRIES = 3000;
 const RAW_CSP = "sandbox; default-src 'none'; img-src 'self' data:; media-src 'self'; style-src 'unsafe-inline'";
 
 function safeNext(next, share) {
-  if (typeof next !== 'string') return '/s/' + share.id;
-  if (next.startsWith('/s/' + share.id) || next.startsWith('/vault/' + share.id)) {
-    if (!next.includes('\\') && !next.startsWith('//')) return next;
-  }
-  return '/s/' + share.id;
+  const home = basePath(share);
+  if (typeof next !== 'string' || next.includes('\\') || next.startsWith('//')) return home;
+  const ok = ['/s/' + share.id, '/vault/' + share.id].concat(share.slug ? ['/s/' + share.slug] : [])
+    .some((p) => next === p || next.startsWith(p + '/') || next.startsWith(p + '?'));
+  return ok ? next : home;
 }
 
 function shareTitle(scope) {
@@ -103,6 +107,10 @@ async function ownerLook(scope) {
 
 function createSharePages({ shares, auth, scopes }) {
   const router = express.Router();
+  // Custom links can be guessed, so a client that keeps opening links that
+  // don't exist is stopped: after 30 misses in 15 minutes every /s/ lookup
+  // from it gets 429 until the window passes.
+  const missLimiter = createLimiter(30, 15 * 60 * 1000);
 
   router.get('/-/share.css', (req, res) => {
     res.sendFile(path.join(__dirname, 'share.css'), { headers: { 'Cache-Control': 'no-cache', 'Content-Type': 'text/css; charset=utf-8' } });
@@ -114,8 +122,17 @@ function createSharePages({ shares, auth, scopes }) {
   }
 
   async function load(req, res) {
-    const share = shares.get(req.params.id);
-    if (!share) { sendMessage(res, 404, 'Link not found', 'This link doesn\'t exist, or it was revoked.'); return null; }
+    const client = auth.clientKey(req);
+    if (missLimiter.blocked(client)) {
+      sendMessage(res, 429, 'Too many requests', 'Too many links that don\'t exist were opened from here. Try again in a few minutes.');
+      return null;
+    }
+    const share = shares.lookup(req.params.id);
+    if (!share) {
+      missLimiter.fail(client);
+      sendMessage(res, 404, 'Link not found', 'This link doesn\'t exist, or it was revoked.');
+      return null;
+    }
     if (shares.isExpired(share)) { sendMessage(res, 410, 'Link expired', 'This shared link has expired.'); return null; }
     const scope = scopes.forShare(share);
     if (!scope || !(await scope.exists())) { sendMessage(res, 404, 'No longer available', 'The shared item was moved or deleted.'); return null; }
@@ -204,7 +221,7 @@ function createSharePages({ shares, auth, scopes }) {
     let note = typeof req.query.note === 'string' ? req.query.note : '';
     if (scope.isFile) note = scope.fileName;
     if (share.permission !== 'edit') {
-      return res.redirect(303, '/s/' + share.id + (note && !scope.isFile ? '/n/' + encodePath(note) : ''));
+      return res.redirect(303, basePath(share) + (note && !scope.isFile ? '/n/' + encodePath(note) : ''));
     }
     res.redirect(303, '/vault/' + share.id + (note ? '/' + encodePath(note) : ''));
   });
@@ -217,14 +234,14 @@ function createSharePages({ shares, auth, scopes }) {
   router.get('/:id/n/*', access, async (req, res, next) => {
     try {
       const { scope } = req;
-      if (scope.isFile) return res.redirect(303, '/s/' + scope.share.id);
+      if (scope.isFile) return res.redirect(303, basePath(scope.share));
       const r = await scope.resolve(req.params[0], 'read').catch(() => null);
       if (!r || (r.area !== 'content' && r.area !== 'root')) return sendMessage(res, 404, 'Not found', 'There is no such note in this share.');
       const st = await fsp.stat(r.abs).catch(() => null);
       if (!st) return sendMessage(res, 404, 'Not found', 'There is no such note in this share.');
       const vaultRel = scope.toVaultRel(req.params[0]);
       if (st.isDirectory()) return renderFolderPage(req, res, vaultRel);
-      if (!vaultRel.toLowerCase().endsWith('.md')) return res.redirect(303, '/s/' + scope.share.id + '/raw/' + encodePath(req.params[0]));
+      if (!vaultRel.toLowerCase().endsWith('.md')) return res.redirect(303, basePath(scope.share) + '/raw/' + encodePath(req.params[0]));
       return renderNotePage(req, res, vaultRel);
     } catch (err) {
       next(err);
@@ -234,13 +251,13 @@ function createSharePages({ shares, auth, scopes }) {
   // ── page assembly ──────────────────────────────────────────────────────────
 
   function noteUrl(scope, rel) {
-    const id = scope.share.id;
-    return scope.isFile ? '/s/' + id : '/s/' + id + '/n/' + encodePath(scope.toShareRel(rel));
+    const base = basePath(scope.share);
+    return scope.isFile ? base : base + '/n/' + encodePath(scope.toShareRel(rel));
   }
 
   function crumbs(scope, vaultRel, isDir) {
-    const id = scope.share.id;
-    const root = '<a href="/s/' + id + '">' + escapeHtml(shareTitle(scope)) + '</a>';
+    const base = basePath(scope.share);
+    const root = '<a href="' + base + '">' + escapeHtml(shareTitle(scope)) + '</a>';
     if (scope.isFile) return '<span class="mp-current">' + escapeHtml(shareTitle(scope)) + '</span>';
     const inside = vaultRel ? scope.toShareRel(vaultRel) : '';
     if (!inside) return '<span class="mp-current">' + escapeHtml(shareTitle(scope)) + '</span>';
@@ -250,7 +267,7 @@ function createSharePages({ shares, auth, scopes }) {
       const last = i === segs.length - 1;
       const label = last && !isDir ? basenameNoMd(s) : s;
       if (last) out.push('<span class="mp-current">' + escapeHtml(label) + '</span>');
-      else out.push('<a href="/s/' + id + '/n/' + encodePath(segs.slice(0, i + 1).join('/')) + '">' + escapeHtml(s) + '</a>');
+      else out.push('<a href="' + base + '/n/' + encodePath(segs.slice(0, i + 1).join('/')) + '">' + escapeHtml(s) + '</a>');
     });
     return out.join('<span class="mp-sep">/</span>');
   }
@@ -274,7 +291,7 @@ function createSharePages({ shares, auth, scopes }) {
   }
 
   function renderTree(scope, node, prefix, current, small) {
-    const id = scope.share.id;
+    const base = basePath(scope.share);
     const coll = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
     let html = '<ul' + (prefix ? '' : ' class="mp-tree"') + '>';
     for (const name of [...node.dirs.keys()].sort(coll.compare)) {
@@ -286,7 +303,7 @@ function createSharePages({ shares, auth, scopes }) {
     for (const name of node.files.sort(coll.compare)) {
       const rel = prefix ? prefix + '/' + name : name;
       const isMd = name.toLowerCase().endsWith('.md');
-      const href = '/s/' + id + (isMd ? '/n/' : '/raw/') + encodePath(rel);
+      const href = base + (isMd ? '/n/' : '/raw/') + encodePath(rel);
       html += '<li><a href="' + escapeHtml(href) + '"' + (rel === current ? ' class="is-active"' : '') + '>' +
         escapeHtml(isMd ? name.slice(0, -3) : name) + (isMd ? '' : '<span class="mp-ext">' + escapeHtml(ext(name)) + '</span>') + '</a></li>';
     }
@@ -306,7 +323,7 @@ function createSharePages({ shares, auth, scopes }) {
     let action = '';
     if (share.permission === 'edit') {
       const note = !isDir && vaultRel ? scope.toShareRel(vaultRel) : '';
-      action = '<a class="mp-button" href="/s/' + share.id + '/edit' + (note ? '?note=' + encodeURIComponent(note) : '') + '">Open in editor</a>';
+      action = '<a class="mp-button" href="' + basePath(share) + '/edit' + (note ? '?note=' + encodeURIComponent(note) : '') + '">Open in editor</a>';
     } else {
       action = '<span class="mp-badge">View only</span>';
     }
@@ -322,7 +339,7 @@ function createSharePages({ shares, auth, scopes }) {
       title: title + (scope.isFile ? '' : ' · ' + shareTitle(scope)),
       bodyClass: look.bodyClass,
       bodyStyle: look.bodyStyle,
-      head: look.hasTheme ? '<link rel="stylesheet" href="/s/' + share.id + '/theme.css">' : '',
+      head: look.hasTheme ? '<link rel="stylesheet" href="' + basePath(share) + '/theme.css">' : '',
       body,
     }));
   }
@@ -343,8 +360,8 @@ function createSharePages({ shares, auth, scopes }) {
       noteUrl: (rel) => noteUrl(scope, rel),
       rawUrl: (rel) => {
         const inside = scope.toShareRel(rel);
-        if (inside != null) return '/s/' + scope.share.id + '/raw/' + encodePath(inside);
-        return '/s/' + scope.share.id + '/raw/' + encodePath(LINKED + '/' + linked.byVault.get(rel));
+        if (inside != null) return basePath(scope.share) + '/raw/' + encodePath(inside);
+        return basePath(scope.share) + '/raw/' + encodePath(LINKED + '/' + linked.byVault.get(rel));
       },
       readNote: async (rel) => {
         const p = path.join(scope.vaultRoot, ...rel.split('/'));
@@ -371,12 +388,12 @@ function createSharePages({ shares, auth, scopes }) {
       items.push({ name: e.name, dir: st.isDirectory() });
     }
     items.sort((a, b) => (a.dir === b.dir ? coll.compare(a.name, b.name) : a.dir ? -1 : 1));
-    const id = scope.share.id;
+    const base = basePath(scope.share);
     const list = items.length
       ? '<ul class="mp-listing">' + items.map((it) => {
         const rel = shareRel ? shareRel + '/' + it.name : it.name;
         const isMd = it.name.toLowerCase().endsWith('.md');
-        const href = '/s/' + id + (it.dir || isMd ? '/n/' : '/raw/') + encodePath(rel);
+        const href = base + (it.dir || isMd ? '/n/' : '/raw/') + encodePath(rel);
         return '<li><a class="internal-link' + (it.dir ? ' mp-folder' : '') + '" href="' + escapeHtml(href) + '">' + escapeHtml(isMd ? it.name.slice(0, -3) : it.name) + '</a></li>';
       }).join('') + '</ul>'
       : '<p>This folder is empty.</p>';

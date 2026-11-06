@@ -343,3 +343,67 @@ test('without MARKPORT_PASSWORD the app stays open but shares are still scoped',
   const listed = await (await anyone.get('/api/shares?vault=' + vaultId)).json();
   assert.equal(listed.authEnabled, false);
 });
+
+test('custom links: /s/<name> as well as the id, unique, changeable', async (t) => {
+  const { base, vaultId } = await start(t);
+  const me = await owner(base);
+  const share = await createShare(me, { vault: vaultId, path: 'Projects/Alpha', permission: 'edit', slug: 'Project Alpha' });
+  assert.equal(share.slug, 'project-alpha');
+  assert.equal(share.url, '/s/project-alpha');
+
+  const guest = client(base);
+  const page = await guest.get('/s/project-alpha');
+  assert.equal(page.status, 200);
+  const html = await page.text();
+  // Links on the page use the custom name.
+  assert.match(html, /href="\/s\/project-alpha\/n\/Notes.md"/);
+  assert.match(html, /href="\/s\/project-alpha\/edit/);
+  assert.equal((await guest.get('/s/PROJECT-ALPHA/n/Notes.md')).status, 200);
+  // The id keeps working, and the grant is the same either way.
+  assert.equal((await guest.get('/s/' + share.id)).status, 200);
+  assert.equal((await guest.get('/api/fs/readdir?vault=' + share.id + '&path=')).status, 200);
+  const edit = await guest.get('/s/project-alpha/edit?note=Plan.md');
+  assert.equal(edit.headers.get('location'), '/vault/' + share.id + '/Plan.md');
+
+  // Validation.
+  for (const bad of ['ab', 'has/slash', '-leading', 'a'.repeat(65), 'raw', '0123456789abcdef0123456789abcdef', 'émoji']) {
+    const res = await me.json('POST', '/api/shares', { vault: vaultId, path: 'Projects/Beta.md', permission: 'view', slug: bad });
+    assert.equal(res.status, 400, bad);
+  }
+  const dup = await me.json('POST', '/api/shares', { vault: vaultId, path: 'Projects/Beta.md', permission: 'view', slug: 'project-alpha' });
+  assert.equal(dup.status, 409);
+
+  // Rename: the old name stops working at once.
+  const renamed = await me.json('PATCH', '/api/shares/' + share.id, { slug: 'alpha-2026' });
+  assert.equal(renamed.status, 200);
+  assert.equal((await renamed.json()).share.url, '/s/alpha-2026');
+  assert.equal((await guest.get('/s/project-alpha')).status, 404);
+  assert.equal((await guest.get('/s/alpha-2026')).status, 200);
+  // Clear: back to the id link.
+  const cleared = await (await me.json('PATCH', '/api/shares/' + share.id, { slug: null })).json();
+  assert.equal(cleared.share.url, '/s/' + share.id);
+  assert.equal((await guest.get('/s/alpha-2026')).status, 404);
+  // Recipients can't rename shares.
+  assert.equal((await guest.json('PATCH', '/api/shares/' + share.id, { slug: 'mine' })).status, 401);
+});
+
+test('custom links with a password, and guessing is rate limited', async (t) => {
+  const { base, vaultId } = await start(t);
+  const me = await owner(base);
+  await createShare(me, { vault: vaultId, path: 'Projects/Alpha/Plan.md', permission: 'view', slug: 'plan', password: 'pw2' });
+  const guest = client(base);
+  const locked = await guest.get('/s/plan');
+  assert.equal(locked.status, 401);
+  assert.match(await locked.text(), /action="\/s\/plan\/unlock"/);
+  const ok = await guest.form('/s/plan/unlock', { password: 'pw2', next: '/s/plan' });
+  assert.equal(ok.status, 303);
+  assert.equal(ok.headers.get('location'), '/s/plan');
+  assert.equal((await guest.get('/s/plan')).status, 200);
+
+  const guesser = client(base);
+  let status = 0;
+  for (let i = 0; i < 31; i++) status = (await guesser.get('/s/guess-' + i)).status;
+  assert.equal(status, 429);
+  // Once blocked, even a real link answers 429 for that client.
+  assert.equal((await guesser.get('/s/plan')).status, 429);
+});

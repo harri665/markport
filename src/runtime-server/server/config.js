@@ -93,6 +93,13 @@ module.exports = {
   watchPollInterval: process.env.WATCH_POLL_INTERVAL
     ? parseInt(process.env.WATCH_POLL_INTERVAL, 10)
     : 3500,
+  // Image library media service (media/index.js): where thumbnails, previews
+  // and optimized models are cached - never inside a vault - and how big that
+  // cache may grow. Default: <data>/media-cache, 5 GB.
+  media: {
+    cacheDir: process.env.MARKPORT_MEDIA_CACHE ? path.resolve(PROJECT_ROOT, process.env.MARKPORT_MEDIA_CACHE) : null,
+    maxBytes: (parseInt(process.env.MARKPORT_MEDIA_CACHE_MB || '5120', 10) || 5120) * 1024 * 1024,
+  },
   bootstrap: {
     // Master switch. When false, /api/bootstrap returns { disabled: true }
     // immediately without scanning the vault. Useful for minimal deployments

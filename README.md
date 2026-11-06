@@ -198,6 +198,10 @@ images can live elsewhere in the vault. The page runs no JavaScript.
 - **View only**: the static page.
 - **Can edit**: the page also has **Open in editor**, the full Obsidian editor limited to that
   note, or to that folder and its subfolders. Recipients don't need an account.
+- Optional **custom link**: `/s/project-alpha` instead of a random id. The random link keeps
+  working too. You can change or remove a custom link later (the pencil button), and the old name
+  stops working at once. A readable name can be guessed, so add a password to anything private.
+  A client that keeps opening links that don't exist is blocked for a while.
 - Optional **password** and **expiry date**. Links can be revoked from the same dialog, or with
   **Manage shared links** in the command palette.
 

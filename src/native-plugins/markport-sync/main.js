@@ -38,8 +38,11 @@
  * changed folder only ever adds files. A full comparison that would delete
  * more than a few files asks first.
  *
- * Hidden paths (.obsidian, .trash, dotfiles) are never synced: each side
- * keeps its own settings and plugins.
+ * Hidden paths (.obsidian, .trash, dotfiles) are not synced as notes. With
+ * "Sync settings and plugins" on, the link that syncs this whole vault also
+ * keeps .obsidian in step - see "Settings and plugins" in LinkSync - on
+ * every full comparison rather than live (the server's watcher doesn't
+ * report hidden paths).
  *
  * The plugin is plain CommonJS with no build step, like the plugins in
  * src/plugins/. It is not one of those system plugins (Markport itself
@@ -56,6 +59,9 @@ const DEFAULT_SETTINGS = {
   intervalMin: 5,
   // [{ vaultId, name, folder }]  folder '' = this whole vault
   links: [],
+  // Also sync .obsidian (settings, plugins, themes, snippets) with the server
+  // vault linked to this whole vault.
+  syncConfig: false,
 };
 
 const MERGE_EXT = /\.(md|txt)$/i;
@@ -64,6 +70,16 @@ const MAX_REMEMBERED_TEXTS = 300;
 const MASS_DELETE_MIN = 10;
 const MASS_DELETE_SHARE = 0.25;
 const PARALLEL = 4;
+
+// Settings and plugins: the server's name for the folder. This vault's may
+// differ (Obsidian lets you rename it): app.vault.configDir.
+const CONFIG = '.obsidian';
+// Never synced: each device's window layout.
+const CONFIG_SKIP = ['workspace.json', 'workspace-mobile.json'];
+const COMMUNITY = CONFIG + '/community-plugins.json';
+// Markport's own plugins, served to every server vault from the repo. The
+// server's /api/fs/tree adds any others it serves the same way.
+const SYSTEM_PLUGINS_FALLBACK = ['markport-clipper', 'markport-share', 'obsidian-web-layout'];
 
 // ── Pure helpers (exported for tests) ───────────────────────────────────────
 
@@ -110,6 +126,65 @@ function shareTarget(links, localPath) {
     if (rel !== null && !isHidden(rel)) return { link, rel };
   }
   return null;
+}
+
+// Whether a path in the server's .obsidian is synced. Not: dotfiles, the
+// window layout, this plugin's own folder (its token and links belong to
+// this device), and the code of Markport's system plugins - the server
+// serves those itself, and a copy uploaded into the vault would pin an old
+// version there. Their data.json (settings, the clipper's image library)
+// is synced.
+function configSynced(rel, systemIds, selfId) {
+  if (typeof rel !== 'string' || !rel.startsWith(CONFIG + '/')) return false;
+  const sub = rel.slice(CONFIG.length + 1);
+  if (!sub || sub.split('/').some((x) => !x || x.startsWith('.'))) return false;
+  if (CONFIG_SKIP.includes(sub)) return false;
+  const m = /^plugins\/([^/]+)(?:\/(.*))?$/.exec(sub);
+  if (m) {
+    if (m[1] === selfId) return false;
+    if ((systemIds || []).includes(m[1])) return m[2] === 'data.json';
+  }
+  return true;
+}
+
+// community-plugins.json lists the enabled plugins. The server leaves
+// Markport's system plugins out of the file (they are always on there), so
+// for those ids each device keeps its own choice.
+function parseIdList(buf) {
+  try {
+    const v = JSON.parse(new TextDecoder().decode(buf));
+    return Array.isArray(v) ? v.filter((x) => typeof x === 'string') : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function idListBytes(list) {
+  return new TextEncoder().encode(JSON.stringify(list, null, 2)).buffer;
+}
+
+// What to upload: this device's list without the system ids.
+function communityForServer(localBuf, systemIds) {
+  const list = parseIdList(localBuf);
+  return list ? idListBytes(list.filter((id) => !systemIds.includes(id))) : localBuf;
+}
+
+// What to write here: the server's list, plus the system ids this device had on.
+function communityForHere(remoteBuf, localBuf, systemIds) {
+  const remote = parseIdList(remoteBuf);
+  if (!remote) return remoteBuf;
+  const local = (localBuf && parseIdList(localBuf)) || [];
+  const out = remote.filter((id) => !systemIds.includes(id));
+  for (const id of local) if (systemIds.includes(id) && !out.includes(id)) out.push(id);
+  return idListBytes(out);
+}
+
+function sameIdLists(a, b, systemIds) {
+  const x = parseIdList(a);
+  const y = parseIdList(b);
+  if (!x || !y) return false;
+  const norm = (l) => [...new Set(l.filter((id) => !systemIds.includes(id)))].sort().join('\n');
+  return norm(x) === norm(y);
 }
 
 // Two links may not share files.
@@ -733,7 +808,206 @@ class LinkSync {
       }
     }
 
+    if (!prefix && this.syncsConfig()) {
+      try { await this.reconcileConfig(); } catch (err) { this.fail('settings and plugins', err); }
+    }
     if (!prefix) this.lastFullSync = Date.now();
+    this.plugin.saveSoon();
+  }
+
+  // ── settings and plugins (.obsidian) ──
+  //
+  // With "Sync settings and plugins" on, the link that syncs this whole
+  // vault also compares the server vault's .obsidian with this vault's
+  // config folder, file by file, with the same rules as notes, except:
+  //
+  //   both sides differ and     this device's copy wins: you turn the option
+  //   there is no base yet      on from the device whose setup you want. The
+  //                             server's copy goes into its .trash/.
+  //   both changed since the    the newer one wins; the other side's copy
+  //   last sync                 goes into that side's trash. (JSON is not
+  //                             merged line by line, and a conflict copy in
+  //                             .obsidian would only be clutter.)
+  //
+  // configSynced() says what is left out. Obsidian reads most of these files
+  // at startup, so what arrives from the server is used after a reload.
+
+  syncsConfig() {
+    return this.folder === '' && !!this.plugin.settings.syncConfig;
+  }
+
+  configState() {
+    if (!this.state.config) this.state.config = { files: {} };
+    return this.state.config;
+  }
+
+  configAllowed(rel) {
+    return configSynced(rel, this.systemIds || SYSTEM_PLUGINS_FALLBACK, this.plugin.manifest.id);
+  }
+
+  // A path in the server's .obsidian → the same file in this vault.
+  configLocal(rel) {
+    return this.app.vault.configDir + rel.slice(CONFIG.length);
+  }
+
+  async listConfigLocal() {
+    const adapter = this.app.vault.adapter;
+    const root = this.app.vault.configDir;
+    const self = CONFIG + '/plugins/' + this.plugin.manifest.id;
+    const out = new Map();
+    const walk = async (dir) => {
+      let listing;
+      try { listing = await adapter.list(dir); } catch (_) { return; }
+      for (const f of listing.files) {
+        const rel = CONFIG + f.slice(root.length);
+        if (!this.configAllowed(rel)) continue;
+        const st = await adapter.stat(f);
+        if (st && st.type !== 'folder') out.set(rel, { mtime: st.mtime, size: st.size });
+      }
+      for (const d of listing.folders) {
+        const rel = CONFIG + d.slice(root.length);
+        const name = rel.slice(rel.lastIndexOf('/') + 1);
+        if (name.startsWith('.') || rel === self) continue;
+        await walk(d);
+      }
+    };
+    await walk(root);
+    return out;
+  }
+
+  async ensureLocalDir(dir) {
+    const adapter = this.app.vault.adapter;
+    const parts = dir.split('/');
+    for (let i = 1; i <= parts.length; i++) {
+      const p = parts.slice(0, i).join('/');
+      if (!(await adapter.exists(p))) await adapter.mkdir(p);
+    }
+  }
+
+  async writeConfigLocal(localPath, buf) {
+    const slash = localPath.lastIndexOf('/');
+    if (slash > 0) await this.ensureLocalDir(localPath.slice(0, slash));
+    await this.app.vault.adapter.writeBinary(localPath, buf);
+    const st = await this.app.vault.adapter.stat(localPath);
+    return st ? { mtime: st.mtime, size: st.size } : { mtime: Date.now(), size: buf.byteLength };
+  }
+
+  async pushConfig(rel, buf) {
+    const lp = this.configLocal(rel);
+    let body = buf || await this.app.vault.adapter.readBinary(lp);
+    if (rel === COMMUNITY) body = communityForServer(body, this.systemIds);
+    const r = await this.upload(rel, body);
+    const l = await this.app.vault.adapter.stat(lp);
+    this.configState().files[rel] = { rm: r.mtime, rs: r.size, lm: l ? l.mtime : 0, ls: l ? l.size : 0 };
+  }
+
+  async pullConfig(rel, remote, buf) {
+    const lp = this.configLocal(rel);
+    let body = buf || await this.download(rel);
+    if (rel === COMMUNITY) {
+      const adapter = this.app.vault.adapter;
+      const localBuf = (await adapter.exists(lp)) ? await adapter.readBinary(lp) : null;
+      body = communityForHere(body, localBuf, this.systemIds);
+    }
+    const l = await this.writeConfigLocal(lp, body);
+    this.configState().files[rel] = { rm: remote.mtime, rs: remote.size, lm: l.mtime, ls: l.size };
+  }
+
+  // This device's copy of a file about to be replaced, into its .trash/.
+  async keepLocalCopy(rel, buf) {
+    const lp = this.configLocal(rel);
+    await this.writeConfigLocal('.trash/' + lp + ' ' + Date.now(), buf);
+  }
+
+  async trashConfigLocal(rel) {
+    const adapter = this.app.vault.adapter;
+    const lp = this.configLocal(rel);
+    if (await adapter.exists(lp)) {
+      if (adapter.trashLocal) await adapter.trashLocal(lp);
+      else await adapter.remove(lp);
+    }
+  }
+
+  // Returns true when this vault's config changed.
+  async applyConfig({ rel, action, local, remote, base }) {
+    const files = this.configState().files;
+    switch (action) {
+      case 'upload':
+        await this.pushConfig(rel);
+        return false;
+      case 'download':
+        await this.pullConfig(rel, remote);
+        return true;
+      case 'compare': {
+        const remoteBuf = await this.download(rel);
+        const localBuf = await this.app.vault.adapter.readBinary(this.configLocal(rel));
+        const same = rel === COMMUNITY ? sameIdLists(remoteBuf, localBuf, this.systemIds) : sameBytes(remoteBuf, localBuf);
+        if (same) {
+          files[rel] = { rm: remote.mtime, rs: remote.size, lm: local.mtime, ls: local.size };
+          return false;
+        }
+        if (!base || local.mtime >= remote.mtime) {
+          await this.trashRemote(rel);
+          await this.pushConfig(rel, localBuf);
+          return false;
+        }
+        await this.keepLocalCopy(rel, localBuf);
+        await this.pullConfig(rel, remote, remoteBuf);
+        return true;
+      }
+      case 'delete-local':
+        await this.trashConfigLocal(rel);
+        delete files[rel];
+        return true;
+      case 'delete-remote':
+        await this.trashRemote(rel);
+        delete files[rel];
+        return false;
+      case 'forget':
+        delete files[rel];
+        return false;
+      default:
+        return false;
+    }
+  }
+
+  async reconcileConfig() {
+    const tree = await this.api('GET', 'tree', { query: { path: CONFIG } });
+    // Markport's own plugins count as system plugins even if this server
+    // doesn't list them (an older one, or one without them installed).
+    this.systemIds = [...new Set(SYSTEM_PLUGINS_FALLBACK.concat(Array.isArray(tree.systemPlugins) ? tree.systemPlugins : []))];
+    const remoteFiles = new Map(tree.files.filter((f) => this.configAllowed(f.path)).map((f) => [f.path, f]));
+    const localFiles = await this.listConfigLocal();
+    const files = this.configState().files;
+
+    const plan = [];
+    for (const rel of new Set([...remoteFiles.keys(), ...localFiles.keys(), ...Object.keys(files)])) {
+      if (!this.configAllowed(rel)) { delete files[rel]; continue; }
+      const local = localFiles.get(rel) || null;
+      const remote = remoteFiles.get(rel) || null;
+      const base = files[rel] || null;
+      const action = decide(base, local, remote);
+      if (action !== 'none') plan.push({ rel, action, local, remote, base });
+    }
+
+    const deletes = plan.filter((p) => p.action === 'delete-local' || p.action === 'delete-remote');
+    const tracked = Object.keys(files).length;
+    if (deletes.length > MASS_DELETE_MIN && deletes.length > tracked * MASS_DELETE_SHARE) {
+      const ok = await this.plugin.confirmDeletes(this.link, deletes);
+      if (!ok) {
+        for (const p of deletes) {
+          delete files[p.rel];
+          p.action = p.action === 'delete-local' ? 'upload' : 'download';
+        }
+      }
+    }
+
+    const changedHere = [];
+    await pool(plan, PARALLEL, async (p) => {
+      try { if (await this.applyConfig(p)) changedHere.push(p.rel); }
+      catch (err) { this.fail(p.rel, err); }
+    });
+    if (changedHere.length) this.plugin.configArrived(changedHere);
     this.plugin.saveSoon();
   }
 
@@ -935,6 +1209,9 @@ class MarkportSyncPlugin extends obsidian.Plugin {
       this.registerEvent(vault.on('modify', (f) => this.dispatch(f.path, (l, rel) => l.onLocalModify(rel, f))));
       this.registerEvent(vault.on('delete', (f) => this.dispatch(f.path, (l, rel) => l.onLocalDelete(rel, f))));
       this.registerEvent(vault.on('rename', (f, oldPath) => this.onRename(f, oldPath)));
+      // Changes in the config folder (settings, plugins), which the events
+      // above don't report.
+      this.registerEvent(vault.on('raw', (p) => this.onRawChange(p)));
       this.startLinks();
     });
 
@@ -951,6 +1228,36 @@ class MarkportSyncPlugin extends obsidian.Plugin {
       if (document.visibilityState === 'visible') this.links.forEach((l) => l.ensureConnected());
     });
     this.refreshStatus();
+  }
+
+  // A file in this vault's config folder changed: compare settings and
+  // plugins with the server a few seconds later (several changes at once,
+  // as when Obsidian saves, become one comparison).
+  onRawChange(p) {
+    const dir = this.app.vault.configDir;
+    if (typeof p !== 'string' || !p.startsWith(dir + '/')) return;
+    const rel = CONFIG + p.slice(dir.length);
+    for (const l of this.links.values()) {
+      if (l.syncsConfig() && l.configAllowed(rel)) l.later('config', 5000, 'settings and plugins', () => l.reconcileConfig());
+    }
+  }
+
+  // Settings or plugins came from the server. Obsidian reads most of them
+  // at startup, so offer a reload.
+  configArrived(paths) {
+    const now = Date.now();
+    if (this.lastConfigNotice && now - this.lastConfigNotice < 10000) return;
+    this.lastConfigNotice = now;
+    const what = paths.length === 1 ? paths[0].slice(CONFIG.length + 1) : paths.length + ' files';
+    const n = new obsidian.Notice('Markport Sync: settings or plugins changed on the server (' + what + '). ' +
+      'Click here to reload Obsidian and use them.', 20000);
+    const el = n && n.noticeEl;
+    if (el && el.addEventListener) {
+      el.addEventListener('click', () => {
+        const cmds = this.app.commands;
+        if (cmds && cmds.executeCommandById) cmds.executeCommandById('app:reload');
+      });
+    }
   }
 
   onunload() {
@@ -1172,12 +1479,12 @@ class MarkportSyncPlugin extends obsidian.Plugin {
     return this.request('GET', 'shares', { query: vaultId ? { vault: vaultId } : {} });
   }
 
-  async createShare(file, { permission, password, expiresAt }) {
+  async createShare(file, { permission, password, expiresAt, slug }) {
     const target = this.shareTargetFor(file);
     if (!target) throw new Error('it isn\'t in a folder linked to a Markport vault');
     try {
       const res = await this.request('POST', 'shares', {
-        json: { vault: target.link.vaultId, path: target.rel, permission, password: password || null, expiresAt: expiresAt || null },
+        json: { vault: target.link.vaultId, path: target.rel, permission, password: password || null, expiresAt: expiresAt || null, slug: slug || null },
       });
       return res.share;
     } catch (err) {
@@ -1187,6 +1494,12 @@ class MarkportSyncPlugin extends obsidian.Plugin {
       }
       throw err;
     }
+  }
+
+  // Set, change or (slug null) remove a share's custom link, /s/<slug>.
+  async setShareSlug(id, slug) {
+    const res = await this.request('PATCH', 'shares/' + encodeURIComponent(id), { json: { slug: slug || null } });
+    return res.share;
   }
 
   async revokeShare(id) {
@@ -1250,6 +1563,9 @@ function renderShareRows(plugin, containerEl, shares, { showPath, onChange }) {
     if (share.expired || share.missing) setting.settingEl.style.opacity = '0.55';
     setting.addExtraButton((b) => b.setIcon('copy').setTooltip('Copy link').onClick(() => copyShareLink(plugin, share)));
     setting.addExtraButton((b) => b.setIcon('external-link').setTooltip('Open in browser').onClick(() => window.open(plugin.shareUrl(share))));
+    setting.addExtraButton((b) => b.setIcon('pencil').setTooltip('Change custom link').onClick(() => {
+      new CustomLinkModal(plugin.app, plugin, share, onChange).open();
+    }));
     setting.addExtraButton((b) => b.setIcon('trash-2').setTooltip('Revoke').onClick(async () => {
       try {
         await plugin.revokeShare(share.id);
@@ -1259,6 +1575,68 @@ function renderShareRows(plugin, containerEl, shares, { showPath, onChange }) {
         new obsidian.Notice('Could not revoke: ' + err.message);
       }
     }));
+  }
+}
+
+// What the server will make of a typed custom link, for the live preview.
+// Validation itself stays on the server.
+function previewSlug(input) {
+  return String(input || '').trim().toLowerCase().replace(/\s+/g, '-');
+}
+
+function addCustomLinkSetting(plugin, containerEl, value, onChange) {
+  const setting = new obsidian.Setting(containerEl).setName('Custom link');
+  let text;
+  const preview = () => {
+    const slug = previewSlug(text.getValue());
+    setting.setDesc(slug ? plugin.settings.serverUrl + '/s/' + slug : 'Optional. Without one the link uses a random id.');
+  };
+  setting.addText((t) => {
+    text = t;
+    t.setPlaceholder('e.g. project-alpha').setValue(value || '').onChange((v) => { onChange(v); preview(); });
+  });
+  preview();
+  setting.descEl.parentElement.createDiv({
+    cls: 'setting-item-description',
+    text: 'Letters, digits, "-" and "_". Easy to guess, unlike the random link - add a password for anything private.',
+  });
+  return setting;
+}
+
+class CustomLinkModal extends obsidian.Modal {
+  constructor(app, plugin, share, onSaved) {
+    super(app);
+    this.plugin = plugin;
+    this.share = share;
+    this.onSaved = onSaved;
+    this.slug = share.slug || '';
+  }
+
+  onOpen() {
+    this.titleEl.setText('Custom link');
+    this.contentEl.createEl('p', {
+      cls: 'setting-item-description',
+      text: 'Changing or removing it stops the old custom link working. The random link always keeps working.',
+    });
+    addCustomLinkSetting(this.plugin, this.contentEl, this.slug, (v) => { this.slug = v; });
+    new obsidian.Setting(this.contentEl)
+      .addButton((b) => b.setButtonText('Remove custom link').setDisabled(!this.share.slug).onClick(() => this.save(null)))
+      .addButton((b) => b.setButtonText('Save').setCta().onClick(() => this.save(this.slug)));
+  }
+
+  async save(slug) {
+    try {
+      const share = await this.plugin.setShareSlug(this.share.id, slug && slug.trim() ? slug : null);
+      new obsidian.Notice(share.slug ? 'Custom link saved' : 'Custom link removed');
+      this.close();
+      this.onSaved();
+    } catch (err) {
+      new obsidian.Notice('Could not save: ' + err.message + signInHint(err));
+    }
+  }
+
+  onClose() {
+    this.contentEl.empty();
   }
 }
 
@@ -1283,6 +1661,7 @@ class ShareModal extends obsidian.Modal {
     this.permission = 'view';
     this.password = '';
     this.expires = '';
+    this.slug = '';
   }
 
   async onOpen() {
@@ -1319,6 +1698,7 @@ class ShareModal extends obsidian.Modal {
         t.inputEl.min = new Date(Date.now() + 86400000).toISOString().slice(0, 10);
         t.onChange((v) => { this.expires = v; });
       });
+    addCustomLinkSetting(this.plugin, this.contentEl, '', (v) => { this.slug = v; });
     new obsidian.Setting(this.contentEl)
       .addButton((b) => b.setButtonText('Create link and copy').setCta().onClick(() => this.create(b)));
     this.createdEl = this.contentEl.createDiv();
@@ -1351,7 +1731,7 @@ class ShareModal extends obsidian.Modal {
     }
     button.setDisabled(true);
     try {
-      const share = await this.plugin.createShare(this.file, { permission: this.permission, password: this.password, expiresAt });
+      const share = await this.plugin.createShare(this.file, { permission: this.permission, password: this.password, expiresAt, slug: this.slug.trim() });
       this.createdEl.empty();
       this.createdEl.createEl('p', { cls: 'setting-item-description', text: 'New link - send this to the people you want to share with:' });
       const input = renderShareLinkBox(this.plugin, this.createdEl, share);
@@ -1475,6 +1855,23 @@ class MarkportSyncSettingTab extends obsidian.PluginSettingTab {
         if (n > 0) { s.intervalMin = n; await plugin.saveSettings(); }
       }));
 
+    const whole = s.links.find((l) => l.folder === '');
+    new obsidian.Setting(containerEl)
+      .setName('Sync settings and plugins')
+      .setDesc(createFragment((f) => {
+        f.appendText('Also keep this vault\'s ' + (this.app.vault.configDir || CONFIG) + ' folder in step with the server vault: ' +
+          'settings, hotkeys, themes, snippets, and the community plugins with their settings. ' +
+          'Only for a server vault synced into this whole vault. Checked on every full comparison, not live. ');
+        f.appendText('The first time, this device\'s copy wins wherever they differ (the server\'s goes into its .trash). ' +
+          'The window layout and Markport Sync\'s own sign-in stay on each device. Reload Obsidian to use what arrives.');
+        if (!whole) { f.createEl('br'); f.appendText('Link a server vault with an empty folder first.'); }
+      }))
+      .addToggle((tg) => tg.setValue(!!s.syncConfig).setDisabled(!whole).onChange(async (on) => {
+        s.syncConfig = on;
+        await plugin.saveSettings();
+        if (on) for (const l of plugin.links.values()) { if (l.syncsConfig()) { l.ensureConnected(); l.scheduleReconcile(0); } }
+      }));
+
     new obsidian.Setting(containerEl).setName('Server vaults').setHeading();
     const listEl = containerEl.createDiv();
     const help = containerEl.createEl('p', { cls: 'setting-item-description' });
@@ -1536,6 +1933,7 @@ module.exports = MarkportSyncPlugin;
 module.exports.helpers = {
   normalizeServerUrl, normalizeFolder, isHidden, toLocal, toRel, under, foldersOverlap, shareTarget,
   sameStat, decide, conflictPath, trashPath, sameBytes, diffHunks, merge3, vaultName,
+  configSynced, communityForServer, communityForHere, sameIdLists,
 };
 module.exports.LinkSync = LinkSync;
 module.exports.HttpError = HttpError;

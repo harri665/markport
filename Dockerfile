@@ -58,6 +58,18 @@ RUN if [ "$INSTALL_CLAUDE_CODE" = "true" ]; then \
    && npm cache clean --force; \
     fi
 
+# ImageMagick: the image library's fallback decoder for formats sharp cannot
+# read (HEIC, JPEG XL, JPEG 2000, EXR, HDR, DDS, XCF, BMP, ICO, ...), used by
+# src/runtime-server/server/media/images.js to make cached previews. Turn it
+# off with --build-arg INSTALL_IMAGEMAGICK=false (those formats then show as
+# plain file cards).
+ARG INSTALL_IMAGEMAGICK=true
+RUN if [ "$INSTALL_IMAGEMAGICK" = "true" ]; then \
+      apt-get update \
+   && apt-get install -y --no-install-recommends imagemagick libheif1 libopenexr-3-1-30 \
+   && rm -rf /var/lib/apt/lists/*; \
+    fi
+
 # /data holds everything that must survive a rebuild: one folder per vault
 # under /data/vaults, the vault registry, and the server user's home
 # (/data/home - Claude Code keeps its login and settings there).

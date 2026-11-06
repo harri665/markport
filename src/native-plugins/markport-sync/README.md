@@ -15,7 +15,16 @@ Markport gets automatically. Markport doesn't need it; only the native app does.
 
 ## Install
 
-Copy the two files into the local vault, then turn the plugin on.
+From a clone of this repo, on a desktop: `<vault>` is the vault's folder, or its name as
+Obsidian shows it.
+
+```bash
+npm run clipper -- --add <vault> --plugin markport-sync
+```
+
+That copies the two files below into the vault, turns the plugin on, and keeps it up to date
+whenever you run `npm run clipper` again after a `git pull`. Restart Obsidian afterwards. Or
+copy the two files by hand:
 
 ```powershell
 # PowerShell; <vault> is the local vault's folder
@@ -58,8 +67,9 @@ Commands: **Sync now** (compare everything right away) and **Reconnect to the se
 
 Right-click a note or folder inside a linked folder and choose **Share on Markport…** (or run
 **Share current note on Markport**). It's the same dialog as **Share…** in the Markport web app:
-pick **View only** or **Can edit**, optionally a password and an expiry date, and **Create link
-and copy**. The link opens on your server (`<server URL>/s/<id>`) and reaches only that note or
+pick **View only** or **Can edit**, optionally a password, an expiry date and a **custom link**
+(`/s/project-alpha` instead of a random id), and **Create link and copy**. The pencil button on a
+link changes or removes its custom name. The link opens on your server (`<server URL>/s/<id>`) and reaches only that note or
 folder. **Manage shared links on Markport** lists the links for every linked vault, with copy,
 open and revoke.
 
@@ -67,7 +77,7 @@ The link points at the server's copy, so a note you only just created has to fin
 (`Markport: synced`) before it can be shared. Hidden files and folders can't be shared, and
 items outside the linked folders don't get the menu entry. Links are made with the plugin's
 token, so you have to be signed in. Share pages use the server vault's theme, not this app's,
-because `.obsidian` isn't synced.
+unless **Sync settings and plugins** is on.
 
 ## How it behaves
 
@@ -82,8 +92,38 @@ because `.obsidian` isn't synced.
 | Offline | changes are compared on reconnect; a full comparison also runs every few minutes (setting) |
 | A full comparison would delete more than 10 files (and more than a quarter of the vault) | you are asked first; **Keep them** copies them back instead |
 
-Hidden files and folders (`.obsidian`, `.trash`, dotfiles) are never synced, so each side keeps
-its own settings, plugins and themes.
+Hidden files and folders (`.obsidian`, `.trash`, dotfiles) are not synced as notes, so each side
+keeps its own settings, plugins and themes, unless you turn on **Sync settings and plugins**.
+
+## Settings and plugins
+
+**Sync settings and plugins** (in the plugin's settings) also keeps this vault's `.obsidian` in
+step with the server vault: Obsidian's settings, hotkeys, appearance, themes, CSS snippets, and
+the community plugins with their settings. It works for the server vault synced into this whole
+vault (folder left empty), so turn it on once that link exists. Turn it on on every device that
+should share the setup.
+
+- It is compared on every full comparison (on start, on reconnect, every few minutes) and a few
+  seconds after a setting changes here, not live like notes: the server doesn't report changes
+  to hidden folders.
+- The first time, **this device's copy wins** wherever the two differ, and the server's copy
+  goes into the server vault's `.trash/.obsidian/`. Turn it on first on the device whose setup
+  you want everywhere.
+- After that, a file changed on both sides keeps the newer copy; the other one goes into that
+  side's trash (`.trash/` in the vault).
+- Not synced: `workspace.json` and `workspace-mobile.json` (each device's open tabs and
+  panes), Markport Sync's own folder (its server, sign-in and links belong to each device), and
+  the code of Markport's own plugins (Markport Clipper, Markport Share, the layout switcher),
+  which every Markport server serves itself. Their `data.json` is synced, so the clipper's image
+  library follows you.
+- Which plugins are on (`community-plugins.json`) is synced, except Markport's own plugins: the
+  server always has those on, so each device keeps its own choice for them.
+- Obsidian reads most of these files when it starts. When settings or plugins arrive from the
+  server, a notice says so: click it to reload Obsidian.
+
+The server vault's `.obsidian` is also what Markport's web app uses for that vault, so a plugin
+turned on here is turned on there too. One that needs the desktop app may not work in the
+browser (for Claudian, see `MARKPORT_NODE_BRIDGE` in `src/deployments/server/README.md`).
 
 Merges use the last synced text, which is kept in memory. Right after Obsidian starts, a file
 changed on both sides gets a conflict copy instead of a merge.

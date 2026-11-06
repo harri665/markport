@@ -469,8 +469,22 @@ function createFsRouter(vaultRegistry, fallbackVaultRoot, hooks = {}) {
         const data = await fsp.readFile(target, encoding);
         res.type('text/plain; charset=utf-8').send(data);
       } else {
-        const data = await fsp.readFile(target);
-        res.type('application/octet-stream').send(data);
+        // Binary (images, models, video, PDFs, ...): streamed, never read
+        // whole into memory, with Range requests (video seeking, partial
+        // model loads), and ETag/Last-Modified so a browser revalidates
+        // instead of downloading again.
+        const s = await fsp.stat(target);
+        if (!s.isFile()) throw Object.assign(new Error('EISDIR: illegal operation on a directory'), { code: 'EISDIR' });
+        res.setHeader('Content-Type', 'application/octet-stream');
+        // no-cache = always revalidate: an edited file is never shown stale,
+        // and an unchanged one costs a 304.
+        res.setHeader('Cache-Control', 'private, no-cache');
+        await new Promise((resolve) => {
+          res.sendFile(target, { dotfiles: 'allow', acceptRanges: true, lastModified: true, etag: true, cacheControl: false }, (err) => {
+            if (err && !res.headersSent) handleError(res, err);
+            resolve();
+          });
+        });
       }
     } catch (err) {
       handleError(res, err);
@@ -624,6 +638,11 @@ function createFsRouter(vaultRegistry, fallbackVaultRoot, hooks = {}) {
   // its mtime and size, and every folder. Hidden entries (".obsidian",
   // ".trash", dotfiles) are left out, as the watcher leaves them out.
   // markport-sync compares this against its last sync to find changes.
+  //
+  // ?path=.obsidian lists the vault's settings and plugins as they are on
+  // disk (markport-sync's "Sync settings and plugins"), without the system
+  // plugin overlay. systemPlugins says which plugin ids are Markport's own,
+  // served to every vault from the repo, so a device leaves their code alone.
   router.get('/tree', async (req, res) => {
     try {
       const rel = String(req.query.path || '').replace(/^\/+|\/+$/g, '');
@@ -648,7 +667,7 @@ function createFsRouter(vaultRegistry, fallbackVaultRoot, hooks = {}) {
         }));
       }
       await walk(root, rel);
-      res.json({ files, dirs });
+      res.json({ files, dirs, systemPlugins: getSystemPluginIds() });
     } catch (err) {
       handleError(res, err);
     }

@@ -1,19 +1,21 @@
 #!/usr/bin/env node
 /**
- * Keep Markport Clipper on this computer in step with this repo: the
- * Obsidian plugin in your desktop vaults, and the browser extension in
- * Chrome / Edge / Brave.
+ * Keep this repo's Obsidian plugins on this computer in step with the repo
+ * (Markport Clipper, Markport Sync) in your desktop vaults, and the
+ * clipper's browser extension in Chrome / Edge / Brave.
  *
- *   npm run clipper                       update the plugin in every vault that has it
- *   npm run clipper -- --add <vault>      also install it into a vault and enable it
+ *   npm run clipper                       update the plugins in every vault that has them
+ *   npm run clipper -- --add <vault>      also install Markport Clipper into a vault and enable it
  *                                         (<vault>: its folder, or its name as Obsidian shows it)
+ *   npm run clipper -- --add <vault> --plugin markport-sync
+ *                                         install Markport Sync instead (--plugin can be repeated)
  *   npm run clipper -- --dry-run          only say what would change
  *
  * Run it after `git pull`, on each computer. Vaults come from desktop
  * Obsidian's own list (obsidian.json), so there is nothing to configure.
- * Only the plugin's code is copied (manifest.json, main.js, styles.css);
- * data.json - its settings, pairing key and image library - is never
- * touched. A vault that is synced between computers (NextCloud, Obsidian
+ * Only a plugin's code is copied (manifest.json, main.js, styles.css);
+ * data.json - its settings: the clipper's pairing key and image library,
+ * Markport Sync's server, sign-in and links - is never touched. A vault that is synced between computers (NextCloud, Obsidian
  * Sync...) gets the update on the others through that sync, so running this
  * on a second computer is harmless: everything is already up to date.
  *
@@ -32,9 +34,12 @@ const os = require('os');
 const path = require('path');
 
 const ROOT = path.resolve(__dirname, '..');
-const PLUGIN_ID = 'markport-clipper';
-const PLUGIN_DIR = path.join(ROOT, 'src', 'plugins', PLUGIN_ID);
-const PLUGIN_FILES = ['manifest.json', 'main.js', 'styles.css'];
+// The plugins this keeps in step: where each lives in the repo.
+const PLUGINS = [
+  { id: 'markport-clipper', name: 'Markport Clipper', dir: path.join(ROOT, 'src', 'plugins', 'markport-clipper') },
+  { id: 'markport-sync', name: 'Markport Sync', dir: path.join(ROOT, 'src', 'native-plugins', 'markport-sync') },
+];
+const CODE_FILES = ['manifest.json', 'main.js', 'styles.css'];
 const EXTENSION_DIR = path.join(ROOT, 'src', 'browser-extension');
 const IS_WIN = process.platform === 'win32';
 
@@ -92,31 +97,32 @@ function findVault(arg, vaults) {
 
 // ── The plugin ──────────────────────────────────────────────────────────────
 
-const pluginDest = (vault) => path.join(vault.path, '.obsidian', 'plugins', PLUGIN_ID);
+const pluginDest = (vault, plugin) => path.join(vault.path, '.obsidian', 'plugins', plugin.id);
+const codeFiles = (plugin) => CODE_FILES.filter((f) => fs.existsSync(path.join(plugin.dir, f)));
 
-function syncPlugin(vault, dryRun) {
-  const dest = pluginDest(vault);
+function syncPlugin(vault, plugin, dryRun) {
+  const dest = pluginDest(vault, plugin);
   const before = versionOf(dest);
-  const changed = PLUGIN_FILES.filter((f) => {
-    const src = fs.readFileSync(path.join(PLUGIN_DIR, f));
+  const changed = codeFiles(plugin).filter((f) => {
+    const src = fs.readFileSync(path.join(plugin.dir, f));
     let cur = null;
     try { cur = fs.readFileSync(path.join(dest, f)); } catch (_) { /* missing */ }
     return !cur || !cur.equals(src);
   });
   if (changed.length && !dryRun) {
     fs.mkdirSync(dest, { recursive: true });
-    for (const f of changed) fs.copyFileSync(path.join(PLUGIN_DIR, f), path.join(dest, f));
+    for (const f of changed) fs.copyFileSync(path.join(plugin.dir, f), path.join(dest, f));
   }
   return { before, changed };
 }
 
 // Adds the plugin to the vault's enabled list. Returns true if it was not there.
-function enablePlugin(vault, dryRun) {
+function enablePlugin(vault, id, dryRun) {
   const file = path.join(vault.path, '.obsidian', 'community-plugins.json');
   const list = readJson(file);
   const ids = Array.isArray(list) ? list : [];
-  if (ids.includes(PLUGIN_ID)) return false;
-  if (!dryRun) fs.writeFileSync(file, JSON.stringify(ids.concat(PLUGIN_ID), null, 2));
+  if (ids.includes(id)) return false;
+  if (!dryRun) fs.writeFileSync(file, JSON.stringify(ids.concat(id), null, 2));
   return true;
 }
 
@@ -183,47 +189,61 @@ function main() {
   const args = process.argv.slice(2);
   const dryRun = args.includes('--dry-run');
   const adds = [];
+  const addPlugins = [];
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--add') {
       if (!args[i + 1]) fail('--add needs a vault: its folder or its name.');
       adds.push(args[++i]);
+    } else if (args[i] === '--plugin') {
+      const id = args[++i];
+      if (!PLUGINS.some((p) => p.id === id)) fail('--plugin is one of: ' + PLUGINS.map((p) => p.id).join(', '));
+      addPlugins.push(id);
     } else if (args[i] !== '--dry-run') {
-      fail('Unknown argument ' + args[i] + '. Usage: npm run clipper -- [--add <vault>]... [--dry-run]');
+      fail('Unknown argument ' + args[i] + '. Usage: npm run clipper -- [--add <vault>]... [--plugin <id>]... [--dry-run]');
     }
   }
-  const version = versionOf(PLUGIN_DIR);
+  if (!addPlugins.length) addPlugins.push('markport-clipper');
   const extVersion = versionOf(EXTENSION_DIR);
   const say = (msg) => console.log('[clipper] ' + msg);
-  say(`This repo: plugin ${version}, extension ${extVersion}${dryRun ? '  (dry run: nothing is written)' : ''}`);
+  say('This repo: ' + PLUGINS.map((p) => p.name + ' ' + versionOf(p.dir)).join(', ') + ', extension ' + extVersion
+    + (dryRun ? '  (dry run: nothing is written)' : ''));
 
-  // The plugin.
+  // The plugins.
   const vaults = knownVaults();
-  const targets = vaults.filter((v) => fs.existsSync(pluginDest(v)));
-  for (const a of adds) {
-    const v = findVault(a, vaults);
-    if (!targets.some((t) => samePath(t.path, v.path))) targets.push(v);
-    v.add = true;
-  }
-  console.log('');
-  say('Obsidian plugin');
-  if (!targets.length) {
-    say('  No vault has it yet. Install it with: npm run clipper -- --add <vault>');
-    if (vaults.length) say('  Your vaults: ' + vaults.map((v) => v.name).join(', '));
-  }
+  const added = adds.map((a) => findVault(a, vaults));
   const restart = [];
-  for (const v of targets) {
-    const { before, changed } = syncPlugin(v, dryRun);
-    const enabled = v.add ? enablePlugin(v, dryRun) : false;
-    let what = !changed.length ? 'up to date'
-      : !before ? 'installed'
-      : before !== version ? `updated ${before} -> ${version}` : 'updated (' + changed.join(', ') + ')';
-    if (enabled) what += ', enabled';
-    say(`  ${v.name}: ${what}   ${v.path}`);
-    if (changed.length || enabled) restart.push(v);
+  for (const plugin of PLUGINS) {
+    const version = versionOf(plugin.dir);
+    const targets = vaults.filter((v) => fs.existsSync(pluginDest(v, plugin))).map((v) => ({ v, add: false }));
+    if (addPlugins.includes(plugin.id)) {
+      for (const v of added) {
+        const t = targets.find((x) => samePath(x.v.path, v.path));
+        if (t) t.add = true; else targets.push({ v, add: true });
+      }
+    }
+    console.log('');
+    say(plugin.name);
+    if (!targets.length) {
+      say('  No vault has it. Install it with: npm run clipper -- --add <vault>'
+        + (plugin.id === 'markport-clipper' ? '' : ' --plugin ' + plugin.id));
+      continue;
+    }
+    for (const { v, add } of targets) {
+      const { before, changed } = syncPlugin(v, plugin, dryRun);
+      const enabled = add ? enablePlugin(v, plugin.id, dryRun) : false;
+      let what = !changed.length ? 'up to date'
+        : !before ? 'installed'
+        : before !== version ? `updated ${before} -> ${version}` : 'updated (' + changed.join(', ') + ')';
+      if (enabled) what += ', enabled';
+      say(`  ${v.name}: ${what}   ${v.path}`);
+      if (changed.length || enabled) restart.push({ v, add });
+    }
   }
+  if (!vaults.length) say('Desktop Obsidian has no vaults on this computer yet.');
   if (restart.length && !dryRun) {
-    say('  Obsidian loads plugin code at startup: restart Obsidian (or turn the plugin off and on)'
-      + (restart.some((v) => v.add) ? '. In a vault that never used community plugins, Obsidian asks once to turn them on' : '') + '.');
+    console.log('');
+    say('Obsidian loads plugin code at startup: restart Obsidian (or turn the plugin off and on)'
+      + (restart.some((r) => r.add) ? '. In a vault that never used community plugins, Obsidian asks once to turn them on' : '') + '.');
   }
 
   // The extension.

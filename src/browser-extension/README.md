@@ -53,7 +53,7 @@ every `git pull` run:
 npm run clipper
 ```
 
-It updates the plugin in every desktop vault that has it (the vaults come from desktop
+It updates the plugin in every desktop vault that has it, and Markport Sync too where it is installed (the vaults come from desktop
 Obsidian's own list), and never touches the plugin's `data.json`, which holds its settings,
 pairing key and image library. It also says where each browser loads the extension from: a copy
 outside this repo, or one the browser still runs an older version of (reload it on the
@@ -112,6 +112,21 @@ into Options once on each computer.
   - **Pin over app…** opens the board in a small window that stays above other apps (Document
     Picture-in-Picture, Chrome/Edge), with a library strip to drag images from. Desktop Obsidian
     opens a popout window instead, and other browsers a floating panel.
+
+  - **Formats.** Anything a browser shows, plus PSD/PSB, TIFF, TGA, QOI, Krita, OpenRaster,
+    Procreate (thumbnail) and camera RAW (its built-in preview), decoded in memory for display.
+    On a Markport server, the server also reads HEIC, JPEG XL, JPEG 2000, EXR, HDR, DDS, XCF
+    and more (with ImageMagick, which the Docker image includes).
+  - **3D models** (GLB/glTF, OBJ+MTL, FBX, STL, PLY, 3MF, DAE, USDZ) open in a live 3D viewer
+    in Details and full screen: drag to orbit, wheel to zoom. On a Markport server each model
+    also gets a turntable you scrub by hovering over its card, rendered once by your browser.
+  - **Flipbooks** are folders named `<name>.flipbook` holding frames (PNG or any image format).
+    Drop numbered frames (or use the import button's **Import flipbook frames…**) to make one.
+    Hover a card to scrub; full screen and Details play it (Space, `,` `.`, wheel or drag). A
+    flipbook named like a model next to it (`Robot.fbx` + `Robot.flipbook`) is its turntable.
+  - **Nothing derived goes in the vault.** Imports are copied unchanged. Locally nothing is
+    converted. A Markport server keeps WebP thumbnails and web-optimized models (meshopt,
+    WebP textures, Brotli) in its own cache, and sends big uploads in resumable chunks.
 
   The grid and the board each have **Fill window** and **Minimize**; the window is never left
   empty. **Details** floats over the layout: the selected image's colors, size and dates, the

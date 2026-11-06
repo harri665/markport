@@ -27,6 +27,7 @@ const createProxyRouter = require('./api/proxy');
 const createSystemPluginFilesRouter = require('./api/system-plugin-files');
 const attachWatchServer = require('./api/watch');
 const { createVaultEvents } = require('./api/vault-events');
+const { createMediaRouter } = require('./media');
 const { createNodeBridgeRouter, attachNodeBridgeProcServer } = require('./api/node-bridge');
 const VaultRegistry = require('./vault-registry');
 const { createAuth } = require('./auth');
@@ -291,6 +292,19 @@ function createApp(appConfig = {}) {
     events: vaultEvents,
   }));
   app.use('/api/electron', createElectronRouter(vaultRegistry, appConfig.vaultPath));
+  // Thumbnails, previews, optimized 3D models and big uploads for the image
+  // library plugin. Everything it derives goes to the media cache, outside
+  // every vault (media/index.js).
+  if (appConfig.media !== false) {
+    const media = appConfig.media || {};
+    app.locals.media = createMediaRouter(vaultRegistry, {
+      cacheDir: media.cacheDir || path.join(dataDir, 'media-cache'),
+      maxBytes: media.maxBytes,
+      events: vaultEvents,
+      housekeeping: media.housekeeping,
+    });
+    app.use('/api/media', app.locals.media);
+  }
   app.use('/api', createSystemPluginFilesRouter());
 
   app.locals.vaultRegistry = vaultRegistry;

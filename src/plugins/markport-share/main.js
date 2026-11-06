@@ -123,6 +123,9 @@ function renderShareList(containerEl, shares, { showPath, onChange }) {
     if (share.expired || share.missing) setting.settingEl.addClass('markport-share-inactive');
     setting.addExtraButton((b) => b.setIcon('copy').setTooltip('Copy link').onClick(() => copyLink(share)));
     setting.addExtraButton((b) => b.setIcon('external-link').setTooltip('Open').onClick(() => window.open(shareUrl(share), '_blank', 'noopener')));
+    setting.addExtraButton((b) => b.setIcon('pencil').setTooltip('Change custom link').onClick(() => {
+      new CustomLinkModal(window.app, share, onChange).open();
+    }));
     setting.addExtraButton((b) => b.setIcon('trash-2').setTooltip('Revoke').onClick(async () => {
       try {
         await api('DELETE', '/api/shares/' + encodeURIComponent(share.id));
@@ -132,6 +135,64 @@ function renderShareList(containerEl, shares, { showPath, onChange }) {
         new obsidian.Notice('Could not revoke: ' + err.message);
       }
     }));
+  }
+}
+
+// What the server will make of a typed custom link (it normalises the same
+// way), for the live preview. Validation itself stays on the server.
+function previewSlug(input) {
+  return String(input || '').trim().toLowerCase().replace(/\s+/g, '-');
+}
+
+const SLUG_HINT = 'Letters, digits, "-" and "_". Easy to guess, unlike the random link - add a password for anything private.';
+
+// Adds a "Custom link" text setting; onChange gets the raw text.
+function addCustomLinkSetting(containerEl, value, onChange) {
+  const setting = new obsidian.Setting(containerEl).setName('Custom link');
+  const preview = () => {
+    const slug = previewSlug(text.getValue());
+    setting.setDesc(slug ? window.location.origin + '/s/' + slug : 'Optional. Without one the link uses a random id.');
+  };
+  let text;
+  setting.addText((t) => {
+    text = t;
+    t.setPlaceholder('e.g. project-alpha').setValue(value || '').onChange((v) => { onChange(v); preview(); });
+  });
+  preview();
+  setting.descEl.parentElement.createDiv({ cls: 'setting-item-description markport-share-slughint', text: SLUG_HINT });
+  return setting;
+}
+
+class CustomLinkModal extends obsidian.Modal {
+  constructor(app, share, onSaved) {
+    super(app);
+    this.share = share;
+    this.onSaved = onSaved;
+    this.slug = share.slug || '';
+  }
+
+  onOpen() {
+    this.titleEl.setText('Custom link');
+    this.contentEl.createEl('p', { cls: 'markport-share-hint', text: 'Changing or removing it stops the old custom link working. The random link always keeps working.' });
+    addCustomLinkSetting(this.contentEl, this.slug, (v) => { this.slug = v; });
+    new obsidian.Setting(this.contentEl)
+      .addButton((b) => b.setButtonText('Remove custom link').setDisabled(!this.share.slug).onClick(() => this.save(null)))
+      .addButton((b) => b.setButtonText('Save').setCta().onClick(() => this.save(this.slug)));
+  }
+
+  async save(slug) {
+    try {
+      const res = await api('PATCH', '/api/shares/' + encodeURIComponent(this.share.id), { slug: slug ? slug : null });
+      new obsidian.Notice(res.share.slug ? 'Custom link saved' : 'Custom link removed');
+      this.close();
+      this.onSaved();
+    } catch (err) {
+      new obsidian.Notice('Could not save: ' + err.message);
+    }
+  }
+
+  onClose() {
+    this.contentEl.empty();
   }
 }
 
@@ -149,6 +210,7 @@ class ShareModal extends obsidian.Modal {
     this.permission = 'view';
     this.password = '';
     this.expires = '';
+    this.slug = '';
   }
 
   async onOpen() {
@@ -185,6 +247,7 @@ class ShareModal extends obsidian.Modal {
         t.inputEl.min = tomorrow.toISOString().slice(0, 10);
         t.onChange((v) => { this.expires = v; });
       });
+    addCustomLinkSetting(this.contentEl, '', (v) => { this.slug = v; });
     new obsidian.Setting(this.contentEl)
       .addButton((b) => b.setButtonText('Create link and copy').setCta().onClick(() => this.create(b)));
     this.createdEl = this.contentEl.createDiv();
@@ -221,6 +284,7 @@ class ShareModal extends obsidian.Modal {
         permission: this.permission,
         password: this.password || null,
         expiresAt,
+        slug: this.slug.trim() || null,
       });
       this.createdEl.empty();
       this.createdEl.createEl('p', { cls: 'markport-share-hint', text: 'New link - send this to the people you want to share with:' });

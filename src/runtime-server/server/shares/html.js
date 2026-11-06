@@ -6,6 +6,7 @@
 'use strict';
 
 const { escapeHtml } = require('./render');
+const { ShareStore } = require('./store');
 
 const PAGE_CSP = [
   "default-src 'none'",
@@ -50,7 +51,7 @@ function messagePage(title, message, { form = '' } = {}) {
 }
 
 function unlockPage(share, next, error) {
-  const form = '<form method="post" action="/s/' + share.id + '/unlock" class="mp-form">' +
+  const form = '<form method="post" action="' + escapeHtml(ShareStore.basePath(share)) + '/unlock" class="mp-form">' +
     '<input type="hidden" name="next" value="' + escapeHtml(next) + '">' +
     '<label>Password<input type="password" name="password" autocomplete="current-password" autofocus required></label>' +
     (error ? '<p class="mp-error">' + escapeHtml(error) + '</p>' : '') +

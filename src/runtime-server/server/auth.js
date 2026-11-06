@@ -234,4 +234,4 @@ function createAuth({ password, dataDir }) {
   };
 }
 
-module.exports = { createAuth, parseCookies, isHttps, safeEqual };
+module.exports = { createAuth, createLimiter, parseCookies, isHttps, safeEqual };

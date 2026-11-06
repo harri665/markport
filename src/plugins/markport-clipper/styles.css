@@ -835,3 +835,90 @@
   .mpl-hint { display: none; }
   .mpl-details { top: 8px; right: 8px; bottom: 8px; max-width: calc(100% - 16px); }
 }
+
+/* ── media: models, flipbooks, decoded formats ── */
+
+/* A picture slot (grid thumb, board node, Details preview, strip thumb). */
+.mpl-thumb, .mpl-bn-img, .mpl-dpreview, .mpl-mini-thumb, .mpl-flip-stage, .mpl-stack-item { position: relative; }
+.mpl-none {
+  position: absolute;
+  inset: 0;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--mpl-mono-font);
+  font-size: 12px;
+  letter-spacing: .06em;
+  color: var(--mpl-muted);
+  pointer-events: none;
+}
+.is-none > .mpl-none { display: flex; }
+.is-none > img { visibility: hidden; }
+.is-loading > img { opacity: 0; }
+.is-loading::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(100deg, transparent 30%, color-mix(in srgb, var(--mpl-text) 7%, transparent) 50%, transparent 70%) 0 0 / 200% 100%;
+  animation: mpl-shimmer 1.2s linear infinite;
+  pointer-events: none;
+}
+@keyframes mpl-shimmer { to { background-position: -200% 0; } }
+
+/* Turntable sprite sheets: one frame shows, the rest are off to the side. */
+.is-sheet { background-repeat: no-repeat; }
+.mpl-thumb.is-model { background: var(--mpl-board); }
+.mpl-thumb.is-sheet, .mpl-bn-img.is-sheet { background-repeat: no-repeat; }
+.mpl-thumb.is-model:not(.is-sheet) > img, .mpl-bn-img.is-model:not(.is-sheet) > img { visibility: hidden; }
+.is-scrub { cursor: ew-resize; }
+.mpl-card.mpl-kind-model .mpl-thumb img, .mpl-bn.is-model .mpl-bn-img img { object-fit: contain; }
+
+.mpl-kind {
+  position: absolute;
+  left: 6px;
+  bottom: 6px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: rgba(20, 21, 24, .85);
+  color: #E8E6E1;
+  font-family: var(--mpl-mono-font);
+  font-size: 10px;
+  pointer-events: none;
+}
+.mpl-card .mpl-kind { bottom: auto; top: 6px; left: auto; right: 6px; }
+.mpl-card.is-selected .mpl-kind { display: none; }
+.mpl-card.is-on-board .mpl-badge + .mpl-kind, .mpl-card .mpl-kind { z-index: 1; }
+
+.mpl-stack-item { aspect-ratio: 1; border-radius: 4px; overflow: hidden; background: var(--background-primary-alt); }
+.mpl-stack-item img { width: 100%; height: 100%; object-fit: cover; display: block; }
+
+/* 3D viewer */
+.mpl-3d { position: relative; width: 100%; height: 100%; min-height: 160px; overflow: hidden; border-radius: 8px; background: var(--mpl-board); touch-action: none; }
+.mpl-3d canvas { display: block; width: 100% !important; height: 100% !important; cursor: grab; }
+.mpl-3d canvas:active { cursor: grabbing; }
+.mpl-3d.is-large { border-radius: 0; background: transparent; }
+.mpl-3d-status { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; text-align: center; padding: 16px; color: var(--mpl-muted); font-size: 12px; }
+.mpl-3d-status.is-error { color: var(--text-error); }
+.mpl-dpreview.is-live { cursor: default; height: 220px; }
+.mpl-dpreview.is-live > img { display: none; }
+
+/* Flipbook player */
+.mpl-flip { display: flex; flex-direction: column; width: 100%; height: 100%; min-height: 0; gap: 8px; }
+.mpl-flip-stage { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; cursor: ew-resize; touch-action: none; user-select: none; }
+.mpl-flip-stage img { max-width: 100%; max-height: 100%; object-fit: contain; pointer-events: none; }
+.mpl-flip-bar { flex: none; display: flex; align-items: center; gap: 8px; padding: 0 4px; }
+.mpl-flip-range { flex: 1; min-width: 60px; accent-color: var(--mpl-accent); }
+.mpl-flip-count { color: var(--mpl-muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.mpl .mpl-flip-fps { height: 28px; font-size: 12px; }
+.mpl-flip.is-compact { gap: 4px; }
+.mpl-full .mpl-flip { max-width: 100%; }
+.mpl-full .mpl-flip-bar { width: min(720px, 100%); align-self: center; }
+
+/* Full screen extras */
+.mpl-full-tools { display: flex; gap: 4px; }
+.mpl-full-frame.is-loading { position: relative; }
+.mpl-full-none { color: var(--mpl-muted); text-align: center; max-width: 420px; line-height: 1.5; }
+
+/* Board nodes for models and flipbooks */
+.mpl-bn.is-model .mpl-bn-img, .mpl-bn.is-flipbook .mpl-bn-img { background-color: var(--mpl-panel); }
+.mpl-bn .mpl-kind { left: 8px; bottom: 8px; }

@@ -67,7 +67,11 @@ const H = MarkportSyncPlugin.helpers;
 function fakeVault() {
   const items = new Map();   // path → TFile | TFolder
   const data = new Map();    // path → ArrayBuffer
-  const handlers = { create: [], modify: [], delete: [], rename: [] };
+  const handlers = { create: [], modify: [], delete: [], rename: [], raw: [] };
+  // The config folder (.obsidian): not vault items, only reachable through
+  // the adapter, as in Obsidian.
+  const rawFiles = new Map();   // path → { buf, mtime }
+  const rawDirs = new Set();
   let clock = 1700000000000;
   const fire = (ev, ...args) => handlers[ev].forEach((fn) => fn(...args));
   const parentOf = (p) => (p.includes('/') ? p.slice(0, p.lastIndexOf('/')) : '');
@@ -104,7 +108,44 @@ function fakeVault() {
     async readBinary(f) { return data.get(f.path).slice(0); },
     async delete(f) { unlinkItem(f); fire('delete', f); },
     async trash(f) { unlinkItem(f); fire('delete', f); },
-    adapter: { async stat(p) { const f = items.get(p); return f && f.stat ? { mtime: f.stat.mtime, size: f.stat.size } : null; } },
+    configDir: '.obsidian',
+    adapter: {
+      async stat(p) {
+        const f = items.get(p);
+        if (f && f.stat) return { type: 'file', mtime: f.stat.mtime, size: f.stat.size };
+        const r = rawFiles.get(p);
+        if (r) return { type: 'file', mtime: r.mtime, size: r.buf.byteLength };
+        return rawDirs.has(p) ? { type: 'folder', mtime: 0, size: 0 } : null;
+      },
+      async exists(p) { return items.has(p) || rawFiles.has(p) || rawDirs.has(p); },
+      async mkdir(p) { rawDirs.add(p); },
+      async list(dir) {
+        const kids = (all) => [...all].filter((k) => k.startsWith(dir + '/') && !k.slice(dir.length + 1).includes('/'));
+        return { files: kids(rawFiles.keys()), folders: kids(rawDirs) };
+      },
+      async readBinary(p) { return rawFiles.get(p).buf.slice(0); },
+      async writeBinary(p, buf) {
+        for (let i = p.indexOf('/'); i > 0; i = p.indexOf('/', i + 1)) {
+          if (!rawDirs.has(p.slice(0, i))) throw new Error('Parent missing: ' + p);
+        }
+        rawFiles.set(p, { buf: buf.slice(0), mtime: (clock += 1000) });
+        fire('raw', p);
+      },
+      async trashLocal(p) {
+        const r = rawFiles.get(p);
+        rawFiles.delete(p);
+        rawFiles.set('.trash/' + p, r);
+        fire('raw', p);
+      },
+      async remove(p) { rawFiles.delete(p); fire('raw', p); },
+    },
+    // as Obsidian or another plugin changing a setting
+    async _writeConfig(p, text) {
+      const parts = p.split('/');
+      for (let i = 1; i < parts.length; i++) rawDirs.add(parts.slice(0, i).join('/'));
+      await vault.adapter.writeBinary(p, new TextEncoder().encode(text).buffer);
+    },
+    _config: (p) => (rawFiles.has(p) ? Buffer.from(rawFiles.get(p).buf).toString('utf8') : null),
     // test helpers, as a user would act in Obsidian
     _text: (p) => (data.has(p) ? Buffer.from(data.get(p)).toString('utf8') : null),
     async _write(p, text) {
@@ -192,7 +233,8 @@ async function waitFor(cond, ms = 5000) {
   }
 }
 
-async function setup(t) {
+async function setup(t, opts = {}) {
+  const folder = opts.folder === undefined ? 'Server' : opts.folder;
   const tmp = await fsp.mkdtemp(path.join(os.tmpdir(), 'markport-sync-plugin-'));
   const app = createApp({
     registryPath: path.join(tmp, 'registry.json'),
@@ -211,6 +253,10 @@ async function setup(t) {
   const baseUrl = 'http://127.0.0.1:' + server.address().port;
   const serverVaultDir = path.join(tmp, 'vaults', 'Notes');
   await fsp.writeFile(path.join(serverVaultDir, 'existing.md'), 'on the server already\n');
+  for (const [rel, text] of Object.entries(opts.serverFiles || {})) {
+    await fsp.mkdir(path.dirname(path.join(serverVaultDir, rel)), { recursive: true });
+    await fsp.writeFile(path.join(serverVaultDir, rel), text);
+  }
 
   // Globals the plugin expects from Obsidian's window.
   const prevWS = globalThis.WebSocket;
@@ -219,6 +265,7 @@ async function setup(t) {
   globalThis.document = { visibilityState: 'visible' };
 
   const vault = fakeVault();
+  for (const [p, text] of Object.entries(opts.localConfig || {})) await vault._writeConfig(p, text);
   const intervals = [];
   const fakeApp = { vault, workspace: { onLayoutReady: (fn) => fn(), on: () => ({}), getActiveFile: () => null }, fileManager: null };
   const plugin = new MarkportSyncPlugin(fakeApp, { id: 'markport-sync' });
@@ -239,7 +286,7 @@ async function setup(t) {
   const token = signIn.token;
   const list = await (await fetch(baseUrl + '/api/vaults/list', { headers: { 'X-Markport-Token': token } })).json();
   const vaultId = Object.keys(list)[0];
-  saved = { settings: { serverUrl: baseUrl, token, links: [{ vaultId, name: 'Notes', folder: 'Server' }] } };
+  saved = { settings: Object.assign({ serverUrl: baseUrl, token, links: [{ vaultId, name: 'Notes', folder }] }, opts.settings) };
 
   t.after(async () => {
     plugin.onunload();
@@ -272,8 +319,9 @@ async function setup(t) {
   vault.on('modify', (f) => plugin.dispatch(f.path, (l, rel) => l.onLocalModify(rel, f)));
   vault.on('delete', (f) => plugin.dispatch(f.path, (l, rel) => l.onLocalDelete(rel, f)));
   vault.on('rename', (f, oldPath) => plugin.onRename(f, oldPath));
+  vault.on('raw', (p) => plugin.onRawChange(p));
   await waitFor(() => linkSync.lastFullSync > 0);
-  return { vault, web, plugin, linkSync, serverVaultDir };
+  return { vault, web, plugin, linkSync, serverVaultDir, vaultId, token, baseUrl };
 }
 
 test('markport-sync keeps a native vault folder and the server vault in step, live', async (t) => {
@@ -341,6 +389,97 @@ test('markport-sync keeps a native vault folder and the server vault in step, li
   assert.deepEqual(here, tree.filter((n) => n.endsWith('.md')));
 });
 
+test('configSynced: which parts of .obsidian are synced', () => {
+  const sys = ['markport-clipper', 'markport-share'];
+  assert.ok(H.configSynced('.obsidian/app.json', sys, 'markport-sync'));
+  assert.ok(H.configSynced('.obsidian/plugins/dataview/main.js', sys, 'markport-sync'));
+  assert.ok(H.configSynced('.obsidian/themes/Minimal/theme.css', sys, 'markport-sync'));
+  assert.ok(H.configSynced('.obsidian/plugins/markport-clipper/data.json', sys, 'markport-sync'), 'system plugin settings sync');
+  assert.ok(!H.configSynced('.obsidian/plugins/markport-clipper/main.js', sys, 'markport-sync'), 'system plugin code does not');
+  assert.ok(!H.configSynced('.obsidian/plugins/markport-sync/data.json', sys, 'markport-sync'), 'own token and links stay here');
+  assert.ok(!H.configSynced('.obsidian/workspace.json', sys, 'markport-sync'));
+  assert.ok(!H.configSynced('.obsidian/workspace-mobile.json', sys, 'markport-sync'));
+  assert.ok(!H.configSynced('.obsidian/plugins/x/.git/HEAD', sys, 'markport-sync'));
+  assert.ok(!H.configSynced('notes/app.json', sys, 'markport-sync'));
+  const enc = (v) => new TextEncoder().encode(JSON.stringify(v)).buffer;
+  const dec = (b) => JSON.parse(new TextDecoder().decode(b));
+  assert.deepEqual(dec(H.communityForServer(enc(['dataview', 'markport-clipper']), sys)), ['dataview']);
+  assert.deepEqual(dec(H.communityForHere(enc(['dataview', 'tasks', 'markport-share']), enc(['markport-clipper', 'old']), sys)),
+    ['dataview', 'tasks', 'markport-clipper']);
+  assert.ok(H.sameIdLists(enc(['a', 'markport-clipper']), enc(['a']), sys));
+  assert.ok(!H.sameIdLists(enc(['a']), enc(['b']), sys));
+});
+
+test('settings and plugins sync with the server vault when the option is on', async (t) => {
+  const { vault, web, plugin, linkSync, serverVaultDir } = await setup(t, {
+    folder: '',
+    settings: { syncConfig: true },
+    serverFiles: {
+      '.obsidian/app.json': '{"server":true}',
+      '.obsidian/workspace.json': '{"layout":"server"}',
+      '.obsidian/plugins/tasks/main.js': 'tasks code from the server',
+    },
+    localConfig: {
+      '.obsidian/app.json': '{"local":true}',
+      '.obsidian/workspace.json': '{"layout":"here"}',
+      '.obsidian/community-plugins.json': '["dataview","markport-clipper"]',
+      '.obsidian/plugins/dataview/main.js': 'dataview code',
+      '.obsidian/plugins/markport-clipper/main.js': 'clipper code here',
+      '.obsidian/plugins/markport-clipper/data.json': '{"library":{}}',
+      '.obsidian/plugins/markport-sync/data.json': '{"token":"secret"}',
+    },
+  });
+  const server = (rel) => fsp.readFile(path.join(serverVaultDir, rel), 'utf8').catch(() => null);
+  await linkSync.queue;
+
+  // First sync: this device's copy wins where both had one; the server's is in its trash.
+  assert.equal(await server('.obsidian/app.json'), '{"local":true}');
+  assert.equal(await server('.trash/.obsidian/app.json'), '{"server":true}');
+  assert.equal(await server('.obsidian/plugins/dataview/main.js'), 'dataview code');
+  assert.equal(vault._config('.obsidian/plugins/tasks/main.js'), 'tasks code from the server');
+  // The window layout and this plugin's own settings stay on each side.
+  assert.equal(await server('.obsidian/workspace.json'), '{"layout":"server"}');
+  assert.equal(vault._config('.obsidian/workspace.json'), '{"layout":"here"}');
+  assert.equal(await server('.obsidian/plugins/markport-sync/data.json'), null);
+  // Markport's own plugins: their settings travel, their code doesn't.
+  assert.equal(await server('.obsidian/plugins/markport-clipper/data.json'), '{"library":{}}');
+  assert.equal(await server('.obsidian/plugins/markport-clipper/main.js'), null);
+  assert.deepEqual(JSON.parse(await server('.obsidian/community-plugins.json')), ['dataview']);
+
+  // Changed in Markport: arrives here on the next full comparison. The
+  // system plugin this device had on stays on.
+  await web.write('.obsidian/app.json', '{"web":2}');
+  await web.write('.obsidian/community-plugins.json', '["dataview","tasks"]');
+  notices.length = 0;
+  plugin.lastConfigNotice = 0;   // at most one reload notice every 10 s
+  await linkSync.run('full', () => linkSync.reconcile(''));
+  assert.equal(vault._config('.obsidian/app.json'), '{"web":2}');
+  assert.deepEqual(JSON.parse(vault._config('.obsidian/community-plugins.json')), ['dataview', 'tasks', 'markport-clipper']);
+  assert.ok(notices.some((n) => /reload Obsidian/.test(n)));
+
+  // Changed here: sent a few seconds later, without waiting for the full check.
+  await vault._writeConfig('.obsidian/hotkeys.json', '{"editor:save":[]}');
+  await waitFor(async () => (await server('.obsidian/hotkeys.json')) === '{"editor:save":[]}', 10000);
+
+  // Removed here: into the server vault's trash.
+  await vault.adapter.trashLocal('.obsidian/plugins/dataview/main.js');
+  await linkSync.run('full', () => linkSync.reconcile(''));
+  assert.equal(await server('.obsidian/plugins/dataview/main.js'), null);
+  assert.equal(await server('.trash/.obsidian/plugins/dataview/main.js'), 'dataview code');
+});
+
+test('settings and plugins stay apart unless the option is on', async (t) => {
+  const { vault, linkSync, serverVaultDir } = await setup(t, {
+    folder: '',
+    serverFiles: { '.obsidian/app.json': '{"server":true}' },
+    localConfig: { '.obsidian/app.json': '{"local":true}', '.obsidian/plugins/dataview/main.js': 'x' },
+  });
+  await linkSync.queue;
+  assert.equal(await fsp.readFile(path.join(serverVaultDir, '.obsidian/app.json'), 'utf8'), '{"server":true}');
+  assert.equal(vault._config('.obsidian/app.json'), '{"local":true}');
+  assert.equal(await fsp.readFile(path.join(serverVaultDir, '.obsidian/plugins/dataview/main.js'), 'utf8').catch(() => null), null);
+});
+
 test('an unknown vault on the server never reads as "everything was deleted"', async (t) => {
   const { vault, linkSync } = await setup(t);
   assert.ok(vault.getAbstractFileByPath('Server/existing.md'));
@@ -378,6 +517,18 @@ test('markport-sync shares a synced note or folder, scoped like the web app', as
   const folder = await plugin.createShare(vault.getAbstractFileByPath('Server/Projects'), { permission: 'edit', password: 'guest' });
   assert.equal(folder.path, 'Projects');
   assert.equal(folder.hasPassword, true);
+
+  // Custom links: set at creation, renamed, removed.
+  const named = await plugin.createShare(vault.getAbstractFileByPath('Server/Projects/Plan.md'), { permission: 'view', slug: 'The Plan' });
+  assert.equal(plugin.shareUrl(named), base + '/s/the-plan');
+  assert.match(await (await fetch(base + '/s/the-plan')).text(), /the plan/);
+  const renamed = await plugin.setShareSlug(named.id, 'plan-v2');
+  assert.equal(plugin.shareUrl(renamed), base + '/s/plan-v2');
+  assert.equal((await fetch(base + '/s/the-plan')).status, 404);
+  const plain = await plugin.setShareSlug(named.id, null);
+  assert.equal(plugin.shareUrl(plain), base + '/s/' + named.id);
+  await assert.rejects(plugin.createShare(vault.getAbstractFileByPath('Server/Projects/Plan.md'), { permission: 'view', slug: 'x' }), /3-64 characters/);
+  await plugin.revokeShare(named.id);
   assert.equal((await fetch(plugin.shareUrl(folder), { redirect: 'manual' })).status, 401);
 
   const listed = await plugin.listShares(plugin.settings.links[0].vaultId);

@@ -223,6 +223,20 @@ test('boards: image paths, renames, bounds, fit and pen strokes', () => {
   assert.equal(H.boardName('Boards/Alley Scene.canvas'), 'Alley Scene');
 });
 
+test('media: numbered frames look like a flipbook; items quack like files', () => {
+  assert.equal(H.looksLikeSequence(['walk_01.png', 'walk_02.png', 'walk_10.png']), true);
+  assert.equal(H.looksLikeSequence(['a.png', 'b.png']), false, 'no numbers');
+  assert.equal(H.looksLikeSequence(['walk_1.png', 'run_2.png']), false, 'different names');
+  assert.equal(H.looksLikeSequence(['one_1.png']), false, 'one file is not a sequence');
+  const frames = [{ name: '1.png', stat: { mtime: 5, ctime: 2, size: 10 } }, { name: '2.png', stat: { mtime: 9, ctime: 3, size: 20 } }];
+  const fb = new H.MediaItem('flipbook', { path: 'Art/Walk.flipbook', name: 'Walk.flipbook', parent: null }, frames);
+  assert.equal(fb.basename, 'Walk');
+  assert.equal(fb.extension, 'flipbook');
+  assert.deepEqual(fb.stat, { mtime: 9, ctime: 2, size: 30 });
+  assert.equal(fb.frame(1).file, frames[1]);
+  assert.equal(fb.frame(99).file, frames[1], 'clamped');
+});
+
 test('library metadata follows renames of files and folders, and goes on delete', () => {
   const lib = { 'A/x.png': { tags: ['t'] }, 'A/B/y.png': { note: 'n' }, 'AB/z.png': { note: 'keep' } };
   assert.equal(H.renameLibraryKeys(lib, 'A', 'C'), true);

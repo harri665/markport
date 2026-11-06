@@ -105,7 +105,6 @@ function createSharing({ vaultRegistry, dataDir, auth }) {
       const out = await Promise.all(list.map(async (s) => {
         const scope = scopes.forShare(s);
         return Object.assign(ShareStore.describe(s), {
-          url: '/s/' + s.id,
           expired: shares.isExpired(s),
           missing: !scope || !(await scope.exists()),
         });
@@ -135,8 +134,23 @@ function createSharing({ vaultRegistry, dataDir, auth }) {
           permission: body.permission,
           password: body.password || null,
           expiresAt: body.expiresAt || null,
+          slug: body.slug || null,
         });
-        res.json({ share: Object.assign(ShareStore.describe(share), { url: '/s/' + share.id, expired: false, missing: false }), authEnabled: auth.enabled });
+        res.json({ share: Object.assign(ShareStore.describe(share), { expired: false, missing: false }), authEnabled: auth.enabled });
+      } catch (err) {
+        res.status(err.status || 500).json({ error: err.message });
+      }
+    });
+
+    // Change a share's custom link: { slug: 'new-name' }, or { slug: null } to
+    // go back to the id-only link. The old custom link stops working at once.
+    router.patch('/:id', express.json({ limit: '4kb' }), async (req, res) => {
+      if (!shares.get(req.params.id)) return res.status(404).json({ error: 'no such share' });
+      if (!req.body || !Object.prototype.hasOwnProperty.call(req.body, 'slug')) return res.status(400).json({ error: 'nothing to change' });
+      try {
+        const share = shares.setSlug(req.params.id, req.body.slug);
+        const scope = scopes.forShare(share);
+        res.json({ share: Object.assign(ShareStore.describe(share), { expired: shares.isExpired(share), missing: !scope || !(await scope.exists()) }) });
       } catch (err) {
         res.status(err.status || 500).json({ error: err.message });
       }
@@ -162,10 +176,10 @@ function createSharing({ vaultRegistry, dataDir, auth }) {
   async function vaultShell(req, res, share, notePath, sendShell) {
     const note = notePath ? '?note=' + encodeURIComponent(notePath) : '';
     if (shares.isExpired(share) || share.permission !== 'edit' || !auth.hasGrant(req, share)) {
-      return res.redirect(303, '/s/' + share.id + '/edit' + note);
+      return res.redirect(303, ShareStore.basePath(share) + '/edit' + note);
     }
     const scope = scopes.forShare(share);
-    if (!scope || !(await scope.exists())) return res.redirect(303, '/s/' + share.id);
+    if (!scope || !(await scope.exists())) return res.redirect(303, ShareStore.basePath(share));
     res.setHeader('Referrer-Policy', 'no-referrer');
     sendShell();
   }
