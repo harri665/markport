@@ -438,6 +438,28 @@ function createFsRouter(vaultRegistry, fallbackVaultRoot, hooks = {}) {
   });
 
   // Read a file (text or binary depending on ?encoding).
+  // A read whose URL names the file's version (?v=<mtime>-<size>, sent by
+  // capacitor-shim.js for plugin and theme files) may be cached by the
+  // browser for good: a changed file has a different version, so a
+  // different URL. Only when the version matches the file actually served -
+  // otherwise the response would be cached under a URL it does not belong to.
+  async function setVersionedCaching(req, res, abs) {
+    const v = req.query.v;
+    if (typeof v !== 'string' || !v) return;
+    // v = "<mtime ms>-<size>". The bootstrap's mtimes are whole milliseconds,
+    // rounded one way (Date.getTime) or truncated the other, so the mtime
+    // matches within 1 ms; the size must be exact.
+    const m = /^(\d+)-(\d+)$/.exec(v);
+    let match = false;
+    if (m) {
+      try {
+        const st = await fsp.stat(abs);
+        match = st.isFile() && st.size === Number(m[2]) && Math.abs(st.mtimeMs - Number(m[1])) < 1;
+      } catch (_) { /* no file: the read below answers the error */ }
+    }
+    res.setHeader('Cache-Control', match ? 'private, max-age=31536000, immutable' : 'private, no-cache');
+  }
+
   router.get('/read', async (req, res) => {
     try {
       const relPath = stripResourcePrefix(req, req.query.path || '');
@@ -479,6 +501,7 @@ function createFsRouter(vaultRegistry, fallbackVaultRoot, hooks = {}) {
         const vaultHas = await fileExists(target);
         if (!vaultHas) {
           if (encoding) {
+            await setVersionedCaching(req, res, systemPath);
             const data = await fsp.readFile(systemPath, encoding);
             return res.type('text/plain; charset=utf-8').send(data);
           }
@@ -490,6 +513,7 @@ function createFsRouter(vaultRegistry, fallbackVaultRoot, hooks = {}) {
       // Serve from debounce buffer if a write is pending.
       const pending = getPendingContent(target);
       if (pending) {
+        if (req.query.v) res.setHeader('Cache-Control', 'no-store');
         if (encoding) {
           res.type('text/plain; charset=utf-8').send(typeof pending.data === 'string' ? pending.data : pending.data.toString(encoding));
         } else {
@@ -498,6 +522,7 @@ function createFsRouter(vaultRegistry, fallbackVaultRoot, hooks = {}) {
         return;
       }
       if (encoding) {
+        await setVersionedCaching(req, res, target);
         const data = await fsp.readFile(target, encoding);
         res.type('text/plain; charset=utf-8').send(data);
       } else {

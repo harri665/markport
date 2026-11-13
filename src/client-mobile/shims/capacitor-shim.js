@@ -167,6 +167,90 @@
     return capError('ENOENT', 'ENOENT: no such file or directory, ' + syscall + " '" + p + "'");
   }
 
+  // ── cacheable plugin/theme reads ────────────────────────────────────────
+  // A plugin's main.js can be megabytes (dataview, tasks, ...). Files over
+  // the bootstrap's per-file limit come stat-only, so every boot used to
+  // download them again: the per-tab `client` id made each URL unique, and
+  // Obsidian loads plugins one after another, so on a phone over cellular
+  // each big plugin added its full download time to startup.
+  //
+  // For files under .obsidian/plugins and .obsidian/themes the URL now
+  // carries the file's version (mtime-size, from the bootstrap stat) and no
+  // client id. The server checks the version against the file and, when it
+  // matches, lets the browser cache the response for good (api/fs.js /read).
+  // An edited file has a new mtime, so a new URL - never a stale copy.
+  const VERSIONED_READ_RE = /^\.obsidian\/(plugins|themes)\//;
+
+  // mtime + size of a file from the bootstrap: its own entry, or - for files
+  // too large to inline, which have none - its parent folder's listing.
+  // Every write and watch event drops the affected entry and listing
+  // (cache-invalidation.js), so what is found here is current.
+  function bootstrapFileStat(cache, p) {
+    if (!cache) return null;
+    const own = cache.fs && cache.fs[p];
+    if (own) return own.isFile ? own : null;
+    const slash = p.lastIndexOf('/');
+    const list = cache.dirs && cache.dirs[slash === -1 ? '' : p.substring(0, slash)];
+    if (!list) return null;
+    const name = p.substring(slash + 1);
+    for (let i = 0; i < list.length; i++) {
+      if (list[i].name === name) return list[i].isFile ? list[i] : null;
+    }
+    return null;
+  }
+
+  function versionedReadUrl(p, encoding) {
+    if (!VERSIONED_READ_RE.test(p)) return null;
+    const entry = bootstrapFileStat(window.__owBootstrapCache, p);
+    if (!entry || !entry.mtime || typeof entry.size !== 'number') return null;
+    const id = getVaultId();
+    return '/api/fs/read?' + (id ? 'vault=' + encodeURIComponent(id) + '&' : '') +
+      'path=' + encodePath(p) + (encoding ? '&encoding=' + encoding : '') +
+      '&v=' + Math.floor(entry.mtime) + '-' + entry.size;
+  }
+
+  // Downloads started ahead of time by prefetchPluginFiles, by URL. Each is
+  // used once: readFile takes it out of the map.
+  const prefetchedReads = new Map();
+
+  // Start downloading every enabled plugin's large files at once, as soon as
+  // the bootstrap arrives. Obsidian still loads plugins in order, but each
+  // one's file is then already arriving (or cached) instead of each download
+  // waiting for the previous plugin. Called by boot.js.
+  function prefetchPluginFiles(cache) {
+    try {
+      if (!cache || !cache.fs) return 0;
+      const listEntry = cache.fs['.obsidian/community-plugins.json'];
+      if (!listEntry || typeof listEntry.content !== 'string') return 0;
+      const enabled = JSON.parse(listEntry.content);
+      if (!Array.isArray(enabled)) return 0;
+      const ov = window.__owPlatformOverrides || {};
+      const desktopApp = ov.isDesktopApp !== false;
+      let n = 0;
+      for (const id of enabled) {
+        const dir = '.obsidian/plugins/' + id + '/';
+        const man = cache.fs[dir + 'manifest.json'];
+        if (!man) continue;
+        if (!desktopApp && typeof man.content === 'string') {
+          try { if (JSON.parse(man.content).isDesktopOnly) continue; } catch (_) { /* load it anyway */ }
+        }
+        for (const name of ['main.js', 'styles.css']) {
+          const inlined = cache.fs[dir + name];
+          if (inlined && typeof inlined.content === 'string') continue;   // already in the bootstrap
+          const url = versionedReadUrl(dir + name, 'utf8');
+          if (!url || prefetchedReads.has(url)) continue;
+          const pending = fetch(url).then((res) => (res.ok ? res.text() : null)).catch(() => null);
+          prefetchedReads.set(url, pending);
+          n++;
+        }
+      }
+      return n;
+    } catch (_) {
+      return 0;
+    }
+  }
+  window.__owPrefetchPluginFiles = prefetchPluginFiles;
+
   // ── opfs-ux: native vault-chooser bridge helpers ────────────────────────
   // The native `.mobile-vault-chooser-screen` (obsidian-mobile/app.js) both
   // (a) validates every entry of its vault list via Filesystem.stat(id) —
@@ -280,8 +364,16 @@
         if (bootstrapSaysMissing(p)) throw missingError('open', p);
       }
 
-      const url = '/api/fs/read?' + vaultQuery() + 'path=' + encodePath(p) +
-        (encoding ? '&encoding=' + encoding : '');
+      const versioned = versionedReadUrl(p, encoding);
+      if (versioned && encoding && prefetchedReads.has(versioned)) {
+        const pending = prefetchedReads.get(versioned);
+        prefetchedReads.delete(versioned);
+        const data = await pending;
+        if (typeof data === 'string') return { data };
+        // the prefetch failed: fall through and read it normally
+      }
+      const url = versioned || ('/api/fs/read?' + vaultQuery() + 'path=' + encodePath(p) +
+        (encoding ? '&encoding=' + encoding : ''));
       const res = await fetch(url);
       if (!res.ok) {
         const json = await res.json().catch(() => ({}));

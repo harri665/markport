@@ -1651,6 +1651,13 @@ const MOBILE_SCRIPTS = [
             var fileCount = data.fs ? Object.keys(data.fs).length : 0;
             var capped = data.capped ? ' (CAPPED: ' + data.cappedReason + ')' : '';
             console.log('[obsidian-web] bootstrap loaded: ' + fileCount + ' files cached' + capped);
+            // Big plugin files (over the bootstrap's per-file limit) start
+            // downloading now, all at once, instead of one by one as
+            // Obsidian reaches each plugin (capacitor-shim.js).
+            if (window.__owPrefetchPluginFiles) {
+              var prefetching = window.__owPrefetchPluginFiles(data);
+              if (prefetching) console.log('[obsidian-web] prefetching ' + prefetching + ' large plugin file(s)');
+            }
             return data;
           })
           .catch(function (err) {
