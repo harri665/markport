@@ -87,7 +87,7 @@ fine for trying it out.
 
 **Chromium gives the complete experience.** Folder vaults - opening a real directory on your disk -
 and auto-refresh on external file changes are Chromium-only. Firefox and Safari get browser-local
-vaults; Safari shipped OPFS writes much later than reads, so check your version.
+vaults, including Safari on iPhone and iPad.
 
 **Markport is not made by, affiliated with, or endorsed by Obsidian.** What you run is your own
 instance, on your own machine, from a bundle you downloaded yourself.

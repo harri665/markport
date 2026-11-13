@@ -134,12 +134,12 @@ if (ACKNOWLEDGEMENT !== termsFromIPC) return window.close();
 | Capability | Chromium | Firefox | Safari |
 |---|:---:|:---:|:---:|
 | Vault storage - read | ✅ | ✅ | ✅ |
-| Vault storage - write | ✅ | ✅ | ⚠️ |
+| Vault storage - write | ✅ | ✅ | ✅ |
 | Folder vaults | ✅ | ❌ | ❌ |
 | Auto-refresh on external change | ✅ | ❌ | ❌ |
 
-> Chromium gives the complete experience. Safari shipped OPFS writes much later than reads -
-> check your version. A secure context (`https://` or `localhost`) is required everywhere.
+> Chromium gives the complete experience. Safari works on iPhone and iPad too, with browser-local
+> vaults. A secure context (`https://` or `localhost`) is required everywhere.
 
 ## There is no public instance
 

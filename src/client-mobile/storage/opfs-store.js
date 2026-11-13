@@ -61,6 +61,83 @@
     return e;
   }
 
+  // ── writing a file handle ───────────────────────────────────────────────
+  // `createWritable()` is the normal path (Chromium, Firefox, Safari 26+).
+  // Safari before 26 — which means every iOS browser on those versions, all
+  // being WebKit — has OPFS but no `createWritable`; its only write API is
+  // `createSyncAccessHandle()`, which works only inside a dedicated Worker.
+  // There, writes go to storage/opfs-write-worker.js. Without this, the very
+  // first write (Obsidian creating .obsidian/ in a new vault) throws and the
+  // app never gets past the start screen on iPhone/iPad.
+  const SCRIPT_SRC = (typeof document !== 'undefined' && document.currentScript && document.currentScript.src) || '';
+  let writeWorker = null;
+  let writeSeq = 0;
+  const pendingWrites = new Map();
+
+  function getWriteWorker() {
+    if (writeWorker) return writeWorker;
+    if (typeof Worker === 'undefined') {
+      throw capError('ENOTSUP', 'this browser cannot write files (no createWritable and no Worker)');
+    }
+    const base = SCRIPT_SRC || (location.origin + '/client-mobile/storage/opfs-store.js');
+    const url = new URL('opfs-write-worker.js', base);
+    url.search = new URL(base).search; // keep the ?v=<bust> cache-buster
+    const w = new Worker(url.href);
+    w.onmessage = (ev) => {
+      const { id, error } = ev.data || {};
+      const p = pendingWrites.get(id);
+      if (!p) return;
+      pendingWrites.delete(id);
+      if (error) p.reject(capError('EIO', 'writeFile: ' + error.name + ': ' + error.message));
+      else p.resolve();
+    };
+    w.onerror = (ev) => {
+      // worker failed to load or crashed — fail everything in flight, and let
+      // the next write start a fresh worker
+      const err = capError('EIO', 'writeFile: write worker failed: ' + ((ev && ev.message) || 'unknown error'));
+      for (const p of pendingWrites.values()) p.reject(err);
+      pendingWrites.clear();
+      if (writeWorker === w) writeWorker = null;
+      try { w.terminate(); } catch (_) {}
+    };
+    writeWorker = w;
+    return w;
+  }
+
+  // Replace the whole contents of `fh` with `data` (string → UTF-8, or an
+  // ArrayBuffer).
+  async function writeHandle(fh, data) {
+    if (typeof fh.createWritable === 'function') {
+      const w = await fh.createWritable();
+      try {
+        await w.write(data);
+      } finally {
+        await w.close();
+      }
+      return;
+    }
+    const root = await navigator.storage.getDirectory();
+    const parts = await root.resolve(fh);
+    if (!parts) {
+      // only an OPFS handle can be reopened inside the worker; folder vaults
+      // (showDirectoryPicker) are Chromium-only, where createWritable exists
+      throw capError('ENOTSUP', 'writeFile: this browser can only write to browser storage (OPFS)');
+    }
+    const isString = typeof data === 'string';
+    const bytes = isString ? new TextEncoder().encode(data) : new Uint8Array(data);
+    await new Promise((resolve, reject) => {
+      const id = ++writeSeq;
+      pendingWrites.set(id, { resolve, reject });
+      try {
+        // transfer only a buffer we made ourselves; a caller's ArrayBuffer is copied
+        getWriteWorker().postMessage({ id, parts, bytes }, isString ? [bytes.buffer] : []);
+      } catch (e) {
+        pendingWrites.delete(id);
+        reject(e);
+      }
+    });
+  }
+
   function rethrowAsEnoent(e, message) {
     if (e && typeof e.code === 'string') throw e; // real capError (code is a string, e.g. 'ENOENT'); DOMException.code is numeric
     throw capError('ENOENT', message);
@@ -146,12 +223,7 @@
     async function writeFileRaw(relPath, arrayBuffer) {
       const { parent, name } = await resolveParent(relPath, { create: true });
       const fh = await parent.getFileHandle(name, { create: true });
-      const w = await fh.createWritable();
-      try {
-        await w.write(arrayBuffer);
-      } finally {
-        await w.close();
-      }
+      await writeHandle(fh, arrayBuffer);
     }
 
     async function copyPath(fromPath, toPath) {
@@ -310,15 +382,9 @@
         const encoding = opts.encoding;
         const { parent, name } = await resolveParent(opts.path, { create: true });
         const fh = await parent.getFileHandle(name, { create: true });
-        const w = await fh.createWritable();
         try {
-          if (encoding) {
-            await w.write(String(opts.data));
-          } else {
-            await w.write(base64ToArrayBuffer(opts.data));
-          }
+          await writeHandle(fh, encoding ? String(opts.data) : base64ToArrayBuffer(opts.data));
         } finally {
-          await w.close();
           markSelfWrite();
         }
         return { uri: '' };
@@ -343,11 +409,9 @@
         const combined = new Uint8Array(existing.length + toAppend.length);
         combined.set(existing, 0);
         combined.set(toAppend, existing.length);
-        const w = await fh.createWritable();
         try {
-          await w.write(combined.buffer);
+          await writeHandle(fh, combined.buffer);
         } finally {
-          await w.close();
           markSelfWrite();
         }
         return {};
