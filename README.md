@@ -42,7 +42,7 @@ The client-only deployment (and local/folder vaults on the Node server) are back
 | Capability | Chromium | Firefox | Safari |
 |---|:---:|:---:|:---:|
 | Vault storage - read (`getDirectory`) | ✅ | ✅ | ✅ |
-| Vault storage - write (`createWritable`) | ✅ | ✅ | ⚠️ shipped much later than `getDirectory` - check your Safari version before relying on it |
+| Vault storage - write | ✅ | ✅ | ✅ - Safari before 26 (and so iOS/iPadOS before 26, in every browser) has no `createWritable`; writes go through `createSyncAccessHandle` in a worker instead |
 | Folder vaults (`showDirectoryPicker`) | ✅ | ❌ | ❌ |
 | Auto-refresh on external folder change (`FileSystemObserver`) | ✅ | ❌ | ❌ - falls back to refresh on tab focus |
 
