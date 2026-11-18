@@ -16,6 +16,7 @@ services:
         OBSIDIAN_VERSION: ${OBSIDIAN_VERSION:-1.12.7}
         INSTALL_CLAUDE_CODE: ${MARKPORT_NODE_BRIDGE:-false}
         INSTALL_IMAGEMAGICK: ${MARKPORT_IMAGEMAGICK:-true}
+        INSTALL_FFMPEG: ${MARKPORT_FFMPEG:-true}
     image: markport:local
     # Local-only image: never pull it from a registry, always build it here.
     # Without this, Portainer's "Re-pull image" tries Docker Hub and fails.
@@ -37,6 +38,10 @@ services:
       # Image library cache (thumbnails, previews, web-optimized 3D models),
       # in /data/media-cache - never inside a vault. Size cap in MB.
       MARKPORT_MEDIA_CACHE_MB: ${MARKPORT_MEDIA_CACHE_MB:-5120}
+      # Videos re-encoded on upload (Markport Sync, "Re-encode large
+      # videos"): quality 18 (large) to 32 (small), and the x264 preset.
+      MARKPORT_VIDEO_CRF: ${MARKPORT_VIDEO_CRF:-26}
+      MARKPORT_VIDEO_PRESET: ${MARKPORT_VIDEO_PRESET:-medium}
       # MCP endpoint for apps like Claude, at /mcp, signed in with OAuth.
       # See "Connecting Claude" in the server README.
       MARKPORT_MCP: ${MARKPORT_MCP:-true}

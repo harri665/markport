@@ -70,6 +70,17 @@ RUN if [ "$INSTALL_IMAGEMAGICK" = "true" ]; then \
    && rm -rf /var/lib/apt/lists/*; \
     fi
 
+# ffmpeg: re-encodes large videos as they are uploaded, when the upload asks
+# for it (Markport Sync's "Re-encode large videos";
+# src/runtime-server/server/media/video.js). Turn it off with
+# --build-arg INSTALL_FFMPEG=false (videos are then stored as uploaded).
+ARG INSTALL_FFMPEG=true
+RUN if [ "$INSTALL_FFMPEG" = "true" ]; then \
+      apt-get update \
+   && apt-get install -y --no-install-recommends ffmpeg \
+   && rm -rf /var/lib/apt/lists/*; \
+    fi
+
 # /data holds everything that must survive a rebuild: one folder per vault
 # under /data/vaults, the vault registry, and the server user's home
 # (/data/home - Claude Code keeps its login and settings there).

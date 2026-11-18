@@ -101,6 +101,33 @@ library looks the same on every device. A device syncing it for the first time t
 copy. Unlike other settings it syncs live (within a couple of seconds), and the clipper uses
 what arrives without a reload.
 
+## Large files and videos
+
+A file bigger than 8 MB is uploaded in pieces, so a reverse proxy's limit on the size of one
+request (Cloudflare: 100 MB) doesn't stop it. The status bar shows the progress
+(`Markport: uploading call.mp4 42%`). On desktop the file is read from disk piece by piece, so
+it doesn't have to fit in memory.
+
+**Re-encode large videos** (off by default) has the server re-encode a video larger than the size
+you set (default 50 MB) before it puts it in its vault: H.264 video and AAC audio, in the same
+container, for `.mp4`, `.m4v`, `.mov` and `.mkv`. The server needs ffmpeg for this (the Docker
+image has it; see `MARKPORT_FFMPEG`, `MARKPORT_VIDEO_CRF` and `MARKPORT_VIDEO_PRESET` in
+`src/deployments/server/README.md`).
+
+- **This device keeps its original.** The server and every other device get the smaller file.
+  The two copies differ on purpose, and stay that way until one of them changes.
+- The video appears on the server only once it is re-encoded, which can take minutes. Until
+  then the plugin's settings show `1 being re-encoded on the server`.
+- If ffmpeg fails, or the result isn't smaller, the original is stored as it is.
+- Change or replace the video here and it is uploaded and re-encoded again. Replace it on the
+  server and that copy comes here, like any other file.
+- If this device forgets what it synced (a re-link into a different folder, a deleted plugin
+  `data.json`), the two copies look like a conflict: the server's stays and the original is
+  kept next to it as a conflict copy.
+- Renaming a video while the server is still re-encoding it uploads it again under the new name.
+
+Both need a server with this release or later. With an older one, files are sent whole, as before.
+
 ## Settings and plugins
 
 **Sync settings and plugins** (in the plugin's settings) also keeps this vault's `.obsidian` in

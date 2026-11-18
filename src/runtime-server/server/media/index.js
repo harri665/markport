@@ -16,14 +16,21 @@
  *   GET  /turntable?vault&path&r[&v]   a model's turntable sprite sheet (WebP); r is the
  *                                      browser renderer's version, part of the key
  *   PUT  /turntable?vault&path&r       store one (rendered by a browser)
- *   POST /upload/start                 { vault, path, size } -> { id, chunk }
+ *   POST /upload/start                 { vault, path, size[, overwrite, reencode] }
+ *                                      -> { id, chunk }
  *   PUT  /upload/chunk?id&offset       raw bytes
  *   GET  /upload/status?id             { received }
- *   POST /upload/finish                { id } -> the file appears in the vault
+ *   POST /upload/finish                { id } -> the file appears in the vault,
+ *                                      or { reencoding: true }: it appears once
+ *                                      ffmpeg has re-encoded it (video.js)
+ *   GET  /upload/encoding?vault        { paths } still being re-encoded
+ *   POST /upload/encoding/cancel       { vault, path } drop one of those
  *
  * Everything derived lives in the cache directory, never in a vault. The
  * originals are only read - except /upload/finish, which writes the uploaded
- * file, unchanged, where the user put it.
+ * file where the user put it: unchanged, unless the upload asked for a video
+ * to be re-encoded (markport-sync's "Re-encode large videos"). `overwrite`
+ * lets an upload replace a file; without it an existing name is refused.
  *
  * `v` is "<mtime>-<size>" of the original as the client knows it. When it
  * matches, the response is cached by the browser for a year (the URL changes
@@ -41,6 +48,7 @@ const formats = require(path.join(__dirname, '..', '..', '..', 'plugins', 'markp
 const { createCache } = require('./cache');
 const { createPool, createLimiter } = require('./pool');
 const images = require('./images');
+const video = require('./video');
 
 const WIDTHS = [256, 480, 1024, 2048];
 const CHUNK = 8 * 1024 * 1024;
@@ -61,13 +69,20 @@ function createMediaRouter(vaultRegistry, opts = {}) {
   const jobs = createLimiter(opts.concurrency || 3);
   const modelJobs = createLimiter(1);
   const uploads = new Map();
+  // Finished uploads ffmpeg is still re-encoding: absolute target -> job.
+  const encodes = new Map();
+  const videoJobs = createLimiter(1);
+  const videoOn = opts.video !== false;
+  let closed = false;
   const router = express.Router();
 
   // Housekeeping: old half-uploads, and the cache's size cap.
   const uploadDir = path.join(cache.root, 'uploads');
   const tidy = async () => {
     try {
+      const active = new Set([...encodes.values()].map((j) => j.id));
       for (const name of await fsp.readdir(uploadDir)) {
+        if (active.has(name.split('.')[0])) continue;
         const p = path.join(uploadDir, name);
         const s = await fsp.stat(p).catch(() => null);
         if (s && Date.now() - s.mtimeMs > 24 * 3600e3) await fsp.rm(p, { force: true });
@@ -157,12 +172,12 @@ function createMediaRouter(vaultRegistry, opts = {}) {
     return n;
   }
 
-  async function move(from, to) {
+  async function move(from, to, overwrite) {
     try {
       await fsp.rename(from, to);
     } catch (e) {
       if (e.code !== 'EXDEV') throw e;
-      await fsp.copyFile(from, to, fs.constants.COPYFILE_EXCL);
+      await fsp.copyFile(from, to, overwrite ? 0 : fs.constants.COPYFILE_EXCL);
       await fsp.rm(from, { force: true });
     }
   }
@@ -181,6 +196,9 @@ function createMediaRouter(vaultRegistry, opts = {}) {
       models: true,
       turntables: true,
       uploadChunk: CHUNK,
+      // /upload/start takes `overwrite`, and `reencode` for these extensions.
+      uploadOverwrite: true,
+      videoReencode: videoOn ? video.extensions() : [],
     });
   });
 
@@ -313,19 +331,107 @@ function createMediaRouter(vaultRegistry, opts = {}) {
 
   // ── chunked uploads ──
 
+  // Put a finished upload (or its re-encoding) at its place in the vault and
+  // tell the sessions watching it.
+  async function place(file, u, existed) {
+    await fsp.mkdir(path.dirname(u.abs), { recursive: true });
+    await move(file, u.abs, u.overwrite);
+    const st = await fsp.stat(u.abs);
+    const meta = { mtime: st.mtime.getTime(), size: st.size };
+    try { const { serverCache } = require('../api/bootstrap'); if (serverCache) serverCache.delete(u.vault); } catch (_) { /* fine */ }
+    if (events) events.publish(u.abs, existed ? 'change' : 'add', null, meta);
+    return meta;
+  }
+
+  const statOf = async (abs) => {
+    const s = await fsp.stat(abs).catch(() => null);
+    return s ? { mtime: s.mtimeMs, size: s.size } : null;
+  };
+
+  // A newer upload to the same place replaces one still being re-encoded.
+  function cancelEncode(abs) {
+    const job = encodes.get(abs);
+    if (!job) return;
+    job.cancelled = true;
+    encodes.delete(abs);
+    if (job.proc) job.proc.kill('SIGKILL');
+    // Still waiting for its turn: encode() tidies up when it gets there. The
+    // manifest goes now, so a restart doesn't bring the upload back.
+    fsp.rm(path.join(uploadDir, job.id + '.json'), { force: true }).catch(() => {});
+  }
+
+  // Re-encode a finished upload, then place it. The original is kept instead
+  // when ffmpeg fails or does not make it smaller. Until then the upload and
+  // a small manifest stay in the upload folder, so a restarted server
+  // carries on (recoverEncodes).
+  function startEncode(job) {
+    encodes.set(job.abs, job);
+    videoJobs('video:' + job.id, () => encode(job))
+      .catch((e) => console.warn('[media] upload not placed:', job.rel, e.message))
+      .finally(() => { if (encodes.get(job.abs) === job) encodes.delete(job.abs); });
+  }
+
+  async function encode(job) {
+    const out = path.join(uploadDir, job.id + '.out');
+    const manifest = path.join(uploadDir, job.id + '.json');
+    const cleanup = () => Promise.all([job.tmp, out, manifest].map((f) => fsp.rm(f, { force: true }).catch(() => {})));
+    if (job.cancelled) return cleanup();
+    if (closed) return;
+    let file = job.tmp;
+    try {
+      await video.reencode(job.tmp, out, video.extOf(job.rel), Object.assign({}, opts.video, { onProcess: (p) => { job.proc = p; } }));
+      const [a, b] = await Promise.all([fsp.stat(job.tmp), fsp.stat(out)]);
+      if (b.size > 0 && b.size < a.size) file = out;
+    } catch (e) {
+      if (!job.cancelled && !closed) console.warn('[media] re-encoding failed, keeping the original:', job.rel, e.message);
+    }
+    job.proc = null;
+    if (job.cancelled) return cleanup();
+    if (closed) { await fsp.rm(out, { force: true }).catch(() => {}); return; }   // resumed on the next start
+    // Written by someone else in the meantime: that newer file stays.
+    const now = await statOf(job.abs);
+    const b = job.before;
+    const untouched = b ? !!now && now.mtime === b.mtime && now.size === b.size : !now;
+    if (untouched) await place(file, job, !!b);
+    else console.warn('[media] ' + job.rel + ' changed while its upload was re-encoded; the upload was dropped');
+    await cleanup();
+  }
+
+  async function recoverEncodes() {
+    const names = await fsp.readdir(uploadDir).catch(() => []);
+    for (const name of names) {
+      if (!name.endsWith('.json')) continue;
+      const m = await readJson(path.join(uploadDir, name));
+      const tmp = path.join(uploadDir, name.slice(0, -5) + '.part');
+      try {
+        if (!m || m.id + '.json' !== name || !(await fsp.stat(tmp).catch(() => null))) throw new Error('incomplete');
+        const abs = resolve(m.vault, m.rel);
+        if (encodes.has(abs)) continue;
+        startEncode({ id: m.id, vault: m.vault, rel: m.rel, abs, tmp, overwrite: !!m.overwrite, before: m.before || null });
+      } catch (_) {
+        await fsp.rm(path.join(uploadDir, name), { force: true }).catch(() => {});
+      }
+    }
+  }
+  if (videoOn) setTimeout(() => recoverEncodes().catch(() => {}), 3000).unref();
+
   router.post('/upload/start', express.json({ limit: '16kb' }), async (req, res) => {
     try {
       const { vault, size } = req.body || {};
       const rel = String((req.body && req.body.path) || '');
       const abs = resolve(vault, rel);
+      const overwrite = req.body.overwrite === true;
       if (!(Number.isSafeInteger(size) && size >= 0 && size <= MAX_UPLOAD)) return res.status(400).json({ error: 'bad size' });
-      if (await fsp.stat(abs).catch(() => null)) return res.status(409).json({ error: 'a file with this name already exists' });
+      const there = await fsp.stat(abs).catch(() => null);
+      if (there && there.isDirectory()) return res.status(409).json({ error: 'a folder with this name already exists' });
+      if (there && !overwrite) return res.status(409).json({ error: 'a file with this name already exists' });
       const id = crypto.randomBytes(16).toString('hex');
       const tmp = path.join(uploadDir, id + '.part');
       await fsp.mkdir(uploadDir, { recursive: true });
       await (await fsp.open(tmp, 'w')).close();
-      uploads.set(id, { vault, rel, abs, size, tmp, client: req.query.client || null });
-      res.json({ id, chunk: CHUNK });
+      const reencode = videoOn && req.body.reencode === true && video.canReencode(rel);
+      uploads.set(id, { vault, rel, abs, size, tmp, overwrite, reencode, client: req.query.client || null });
+      res.json({ id, chunk: CHUNK, reencode });
     } catch (e) { fail(res, e); }
   });
 
@@ -354,19 +460,45 @@ function createMediaRouter(vaultRegistry, opts = {}) {
       if (!u) return res.status(404).json({ error: 'unknown upload' });
       const s = await fsp.stat(u.tmp);
       if (s.size !== u.size) return res.status(409).json({ error: 'incomplete: ' + s.size + ' of ' + u.size + ' bytes' });
-      await fsp.mkdir(path.dirname(u.abs), { recursive: true });
-      if (await fsp.stat(u.abs).catch(() => null)) return res.status(409).json({ error: 'a file with this name already exists' });
-      await move(u.tmp, u.abs);
+      const before = await statOf(u.abs);
+      if (before && !u.overwrite) return res.status(409).json({ error: 'a file with this name already exists' });
       uploads.delete(id);
-      const st = await fsp.stat(u.abs);
-      const meta = { mtime: st.mtime.getTime(), size: st.size };
-      try { const { serverCache } = require('../api/bootstrap'); if (serverCache) serverCache.delete(u.vault); } catch (_) { /* fine */ }
-      if (events) events.publish(u.abs, 'add', null, meta);
+      cancelEncode(u.abs);
+      if (u.reencode) {
+        const job = { id, vault: u.vault, rel: u.rel, abs: u.abs, tmp: u.tmp, overwrite: u.overwrite, before };
+        await fsp.writeFile(path.join(uploadDir, id + '.json'),
+          JSON.stringify({ id, vault: job.vault, rel: job.rel, overwrite: job.overwrite, before }));
+        startEncode(job);
+        return res.json({ ok: true, path: u.rel, reencoding: true });
+      }
+      const meta = await place(u.tmp, u, !!before);
       res.json(Object.assign({ ok: true, path: u.rel }, meta));
     } catch (e) { fail(res, e); }
   });
 
-  router.close = () => pool.close();
+  // The uploader deleted or renamed the file meanwhile: drop its upload.
+  router.post('/upload/encoding/cancel', express.json({ limit: '16kb' }), (req, res) => {
+    try {
+      const abs = resolve(req.body && req.body.vault, String((req.body && req.body.path) || ''));
+      const was = encodes.has(abs);
+      cancelEncode(abs);
+      res.json({ ok: true, cancelled: was });
+    } catch (e) { fail(res, e); }
+  });
+
+  // What is still being re-encoded for a vault: uploads that finished but
+  // are not in it yet.
+  router.get('/upload/encoding', (req, res) => {
+    const vault = String(req.query.vault || '');
+    res.setHeader('Cache-Control', 'private, no-cache');
+    res.json({ paths: [...encodes.values()].filter((j) => j.vault === vault).map((j) => j.rel) });
+  });
+
+  router.close = () => {
+    closed = true;
+    for (const job of encodes.values()) if (job.proc) job.proc.kill('SIGKILL');
+    return pool.close();
+  };
   return router;
 }
 

@@ -18,6 +18,9 @@ const os = require('os');
 const path = require('path');
 const test = require('node:test');
 const WebSocket = require('ws');
+const crypto = require('crypto');
+const { spawnSync } = require('child_process');
+const videoTool = require('../media/video');
 
 const { createApp } = require('../index');
 const attachWatchServer = require('../api/watch');
@@ -186,6 +189,17 @@ test('decide: one changed side wins; nothing is deleted without a base', () => {
   assert.equal(H.decide(null, same, remoteSame), 'compare');
 });
 
+test('decide: a video the server is re-encoding is expected to differ there', () => {
+  const base = { rm: 0, rs: 0, lm: 20, ls: 9, enc: 1 };
+  const same = { mtime: 20, size: 9 };
+  assert.equal(H.decide(base, same, null), 'await-encode', 'not there yet: never "deleted on the server"');
+  assert.equal(H.decide(base, same, { mtime: 50, size: 3 }), 'adopt', 'the smaller copy is not downloaded over the original');
+  assert.equal(H.decide(base, { mtime: 99, size: 10 }, null), 'upload');
+  assert.equal(H.decide(base, { mtime: 99, size: 10 }, { mtime: 50, size: 3 }), 'upload');
+  assert.equal(H.decide(base, null, { mtime: 50, size: 3 }), 'delete-remote');
+  assert.equal(H.decide(base, null, null), 'forget');
+});
+
 test('merge3 merges separate edits and refuses overlapping ones', () => {
   const base = 'title\n\nalpha\nbeta\ngamma\n';
   assert.equal(H.merge3(base, 'title\n\nALPHA\nbeta\ngamma\n', 'title\n\nalpha\nbeta\ngamma\ndelta\n'),
@@ -326,7 +340,7 @@ async function setup(t, opts = {}) {
   vault.on('rename', (f, oldPath) => plugin.onRename(f, oldPath));
   vault.on('raw', (p) => plugin.onRawChange(p));
   await waitFor(() => linkSync.lastFullSync > 0);
-  return { vault, web, plugin, linkSync, serverVaultDir, vaultId, token, baseUrl };
+  return { vault, web, plugin, linkSync, serverVaultDir, vaultId, token, baseUrl, tmp };
 }
 
 test('markport-sync keeps a native vault folder and the server vault in step, live', async (t) => {
@@ -392,6 +406,88 @@ test('markport-sync keeps a native vault folder and the server vault in step, li
   const here = vault.getAllLoadedFiles().filter((f) => f instanceof TFile && f.path.startsWith('Server/') && !f.path.slice(7).includes('/'))
     .map((f) => f.path.slice(7)).sort();
   assert.deepEqual(here, tree.filter((n) => n.endsWith('.md')));
+});
+
+test('a file too big for one request goes up in pieces, and can be replaced', async (t) => {
+  const { vault, linkSync, serverVaultDir, plugin } = await setup(t);
+  const big = crypto.randomBytes(19 * 1024 * 1024 + 5);
+  const whole = [];
+  const realRequest = plugin.request.bind(plugin);
+  plugin.request = (method, endpoint, opts) => {
+    if (endpoint === 'fs/write' && opts.body && opts.body.byteLength > 16 * 1024 * 1024) whole.push(opts.query.path);
+    return realRequest(method, endpoint, opts);
+  };
+  await vault.createFolder('Server/Media');
+  await vault.createBinary('Server/Media/big.bin', big.buffer.slice(big.byteOffset, big.byteOffset + big.length));
+  const onServer = path.join(serverVaultDir, 'Media', 'big.bin');
+  await waitFor(async () => (await fsp.stat(onServer).catch(() => null) || {}).size === big.length, 20000);
+  assert.ok((await fsp.readFile(onServer)).equals(big));
+  assert.deepEqual(whole, [], 'never as one request');
+
+  // Changed here: the pieces replace the server's copy.
+  const big2 = crypto.randomBytes(9 * 1024 * 1024);
+  await vault.modifyBinary(vault.getAbstractFileByPath('Server/Media/big.bin'), big2.buffer.slice(big2.byteOffset, big2.byteOffset + big2.length));
+  await waitFor(async () => (await fsp.stat(onServer)).size === big2.length, 20000);
+  await linkSync.queue;
+  assert.ok((await fsp.readFile(onServer)).equals(big2));
+  assert.equal(linkSync.lastError, '');
+  // Small files still go the short way.
+  await vault._write('Server/small.md', 'small\n');
+  await waitFor(async () => (await fsp.readFile(path.join(serverVaultDir, 'small.md'), 'utf8').catch(() => null)) === 'small\n');
+});
+
+test('a large video is re-encoded by the server; this device keeps its original', { skip: !videoTool.ffmpeg() && 'ffmpeg is not installed' }, async (t) => {
+  const { vault, linkSync, serverVaultDir, tmp } = await setup(t, { settings: { reencodeVideos: true, reencodeOverMB: 1 } });
+  // A few seconds of noisy test video, nearly uncompressed.
+  const src = path.join(tmp, 'call.mp4');
+  const made = spawnSync(videoTool.ffmpeg(), ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=640x360:rate=30,noise=alls=30:allf=t',
+    '-f', 'lavfi', '-i', 'sine=frequency=440', '-t', '4', '-c:v', 'libx264', '-preset', 'ultrafast', '-qp', '4', '-c:a', 'aac', '-f', 'mp4', src]);
+  assert.equal(made.status, 0, String(made.stderr));
+  const original = await fsp.readFile(src);
+  assert.ok(original.length > 9 * 1024 * 1024, 'test video is ' + original.length + ' bytes');
+
+  await vault.createBinary('Server/call.mp4', original.buffer.slice(original.byteOffset, original.byteOffset + original.length));
+  const onServer = path.join(serverVaultDir, 'call.mp4');
+  await waitFor(() => fsp.stat(onServer).then(() => true, () => false), 60000);
+  await waitFor(() => !linkSync.state.files['call.mp4'].enc, 10000);
+  await linkSync.queue;
+
+  const encoded = await fsp.readFile(onServer);
+  assert.ok(encoded.length < original.length / 2, encoded.length + ' of ' + original.length);
+  assert.equal(encoded.subarray(4, 8).toString('latin1'), 'ftyp');
+  const probe = spawnSync(videoTool.ffmpeg(), ['-hide_banner', '-i', onServer], { encoding: 'utf8' });
+  assert.match(probe.stderr, /Video: h264/);
+  assert.match(probe.stderr, /Audio: aac/);
+
+  // The original stays here, through full comparisons too.
+  await linkSync.reconcile('');
+  await linkSync.queue;
+  assert.equal(vault.getAbstractFileByPath('Server/call.mp4').stat.size, original.length);
+  assert.equal((await fsp.stat(onServer)).size, encoded.length);
+  assert.equal(linkSync.state.files['call.mp4'].rs, encoded.length);
+  assert.equal(linkSync.state.files['call.mp4'].ls, original.length);
+  assert.equal(linkSync.lastError, '');
+  // Nothing of the upload is left behind.
+  await waitFor(async () => (await fsp.readdir(path.join(tmp, 'media-cache', 'uploads'))).length === 0);
+
+  // Deleted here: deleted there, not brought back.
+  await vault.trash(vault.getAbstractFileByPath('Server/call.mp4'));
+  await waitFor(() => fsp.stat(onServer).then(() => false, () => true));
+
+  // Renamed while the server is still re-encoding: only the new name ends up there.
+  await vault.createBinary('Server/second.mp4', original.buffer.slice(original.byteOffset, original.byteOffset + original.length));
+  await waitFor(() => !!(linkSync.state.files['second.mp4'] && linkSync.state.files['second.mp4'].enc), 20000);
+  await vault._rename('Server/second.mp4', 'Server/third.mp4');
+  await waitFor(() => fsp.stat(path.join(serverVaultDir, 'third.mp4')).then(() => true, () => false), 60000);
+  await waitFor(() => !linkSync.state.files['third.mp4'].enc, 10000);
+  await linkSync.queue;
+  await linkSync.reconcile('');
+  await new Promise((r) => setTimeout(r, 1500));
+  await linkSync.queue;
+  assert.equal(await fsp.stat(path.join(serverVaultDir, 'second.mp4')).catch(() => null), null);
+  assert.equal(vault.getAbstractFileByPath('Server/second.mp4'), null);
+  assert.equal(vault.getAbstractFileByPath('Server/third.mp4').stat.size, original.length);
+  assert.equal(linkSync.lastError, '');
 });
 
 test('configSynced: which parts of .obsidian are synced', () => {

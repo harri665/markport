@@ -172,6 +172,23 @@ test('chunked upload: resumable pieces, then the file appears unchanged in the v
     body: JSON.stringify({ vault: s.id, path: 'Models/big.fbx', size: 1 }),
   });
   assert.equal(dup.status, 409, 'never overwrites');
+
+  // ...unless asked to (markport-sync, for a file changed on a device).
+  const caps = await (await fetch(s.base + '/api/media/caps?vault=' + s.id)).json();
+  assert.equal(caps.uploadOverwrite, true);
+  assert.ok(Array.isArray(caps.videoReencode));
+  const again = await (await fetch(s.base + '/api/media/upload/start', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ vault: s.id, path: 'Models/big.fbx', size: 4, overwrite: true, reencode: true }),
+  })).json();
+  assert.equal(again.reencode, false, 'only videos are re-encoded');
+  await fetch(s.base + '/api/media/upload/chunk?' + q({ id: again.id, offset: 0 }), { method: 'PUT', body: Buffer.from('new!') });
+  const replaced = await (await fetch(s.base + '/api/media/upload/finish', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: again.id }),
+  })).json();
+  assert.equal(replaced.size, 4);
+  assert.equal(await fsp.readFile(path.join(s.vaultPath, 'Models', 'big.fbx'), 'utf8'), 'new!');
+  assert.deepEqual((await (await fetch(s.base + '/api/media/upload/encoding?vault=' + s.id)).json()).paths, []);
 });
 
 test('models: a GLB is optimized into the cache (meshopt, Brotli); other formats ask for a browser conversion', async (t) => {

@@ -223,6 +223,9 @@ gets them each time it connects, and edits apply without a restart.
 | `MARKPORT_MCP_PLAIN_PUNCTUATION` | `false` | `true`: refuse writes through MCP that add em/en dashes or emoji to notes |
 | `MARKPORT_MCP_INSTRUCTIONS_FILE` | `/data/mcp-instructions.md` | instructions sent to the app when it connects |
 | `MARKPORT_IMAGEMAGICK` | `true` | build the image with ImageMagick, for previews of HEIC, JPEG XL, JPEG 2000, EXR, HDR, DDS, XCF, BMP, ICO and more |
+| `MARKPORT_FFMPEG` | `true` | build the image with ffmpeg, so Markport Sync can have large videos re-encoded as they are uploaded (its "Re-encode large videos" setting, off by default) |
+| `MARKPORT_VIDEO_CRF` | `26` | quality of re-encoded videos: 18 (large files) to 32 (small) |
+| `MARKPORT_VIDEO_PRESET` | `medium` | x264 preset for re-encoding; slower presets make smaller files |
 
 The image also sets the server's own variables (`HOST`, `PORT`, `VAULTS_DIR`,
 `VAULT_PATH`, `VAULT_REGISTRY`, `HOME=/data/home`). See "Configuration" in the

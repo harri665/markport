@@ -34,6 +34,12 @@
  *   deleted on one side,         the changed copy is restored to the side
  *   changed on the other         that deleted it
  *
+ * Large files go up in pieces (the server's /api/media/upload), so a reverse
+ * proxy's request size limit (Cloudflare: 100 MB) doesn't stop them. With
+ * "Re-encode large videos" on, the server re-encodes a big video before it
+ * puts it in its vault: this device keeps its original, the server and every
+ * other device get the smaller file (see uploadLarge).
+ *
  * Nothing is ever deleted without a base: a first sync, a re-link or a
  * changed folder only ever adds files. A full comparison that would delete
  * more than a few files asks first.
@@ -63,6 +69,10 @@ const DEFAULT_SETTINGS = {
   // Also sync .obsidian (settings, plugins, themes, snippets) with the server
   // vault linked to this whole vault.
   syncConfig: false,
+  // Ask the server to re-encode videos larger than reencodeOverMB when they
+  // are uploaded. This device keeps the original.
+  reencodeVideos: false,
+  reencodeOverMB: 50,
 };
 
 const MERGE_EXT = /\.(md|txt)$/i;
@@ -71,6 +81,9 @@ const MAX_REMEMBERED_TEXTS = 300;
 const MASS_DELETE_MIN = 10;
 const MASS_DELETE_SHARE = 0.25;
 const PARALLEL = 4;
+// Files larger than one piece (the server says how big, 8 MB) go up in pieces.
+const CHUNK_RETRIES = 3;
+const MB = 1024 * 1024;
 
 // Settings and plugins: the server's name for the folder. This vault's may
 // differ (Obsidian lets you rename it): app.vault.configDir.
@@ -216,13 +229,21 @@ function sameStat(a, b) {
 
 /**
  * What to do with one file.
- *   base   { rm, rs, lm, ls }  remote/local mtime+size at the last sync, or null
+ *   base   { rm, rs, lm, ls }  remote/local mtime+size at the last sync, or null;
+ *                              enc: 1 while the server is re-encoding what was
+ *                              uploaded (its copy is expected to differ)
  *   local  { mtime, size }     or null when the file is not here
  *   remote { mtime, size }     or null when it is not on the server
  */
 function decide(base, local, remote) {
   const localChanged = !!local && (!base || !sameStat(local, { mtime: base.lm, size: base.ls }));
   const remoteChanged = !!remote && (!base || !sameStat(remote, { mtime: base.rm, size: base.rs }));
+  if (base && base.enc) {
+    // Uploaded, and the server is re-encoding it. Unchanged here: its copy,
+    // once there, is the re-encoding of this one. Changed here: send it again.
+    if (local) return localChanged ? 'upload' : remote ? 'adopt' : 'await-encode';
+    return remote ? 'delete-remote' : 'forget';
+  }
   if (local && remote) {
     if (!localChanged && !remoteChanged) return 'none';
     if (localChanged && !remoteChanged) return 'upload';
@@ -630,6 +651,90 @@ class LinkSync {
     return s || { mtime: 0, size: buf.byteLength };
   }
 
+  // ── large files ──
+
+  // Read a file piece by piece: straight from disk on desktop, so a video
+  // of several GB never has to fit in memory; elsewhere from one read.
+  async openReader(file) {
+    const adapter = this.app.vault.adapter;
+    if (obsidian.Platform && obsidian.Platform.isDesktopApp && typeof adapter.getFullPath === 'function') {
+      try {
+        const handle = await require('fs').promises.open(adapter.getFullPath(file.path), 'r');
+        return {
+          async read(offset, length) {
+            const b = new Uint8Array(length);
+            const { bytesRead } = await handle.read(b, 0, length, offset);
+            return b.buffer.slice(0, bytesRead);
+          },
+          close: () => handle.close(),
+        };
+      } catch (_) { /* no Node here after all */ }
+    }
+    const buf = await this.app.vault.readBinary(file);
+    return { read: async (offset, length) => buf.slice(offset, offset + length), close: async () => {} };
+  }
+
+  // Paths the server is still re-encoding for this vault (asked at most
+  // every few seconds).
+  async serverEncoding() {
+    const c = this.encodingCache;
+    if (c && Date.now() - c.at < 5000) return c.paths;
+    const r = await this.plugin.request('GET', 'media/upload/encoding', { query: { vault: this.vaultId } });
+    const paths = new Set((r && r.paths) || []);
+    this.encodingCache = { at: Date.now(), paths };
+    return paths;
+  }
+
+  /**
+   * Upload a file too big for one request in pieces. Returns false when the
+   * file is small or the server can't take pieces (an older one): the caller
+   * then sends it whole, as before.
+   *
+   * A video over the size in the settings is re-encoded by the server before
+   * it lands in the server vault. The file here is not touched; its base is
+   * marked `enc` until the server's copy shows up (decide: 'adopt').
+   */
+  async uploadLarge(rel, local) {
+    const caps = await this.plugin.mediaCaps();
+    if (!caps || !caps.uploadOverwrite || !(caps.uploadChunk > 0) || local.size <= caps.uploadChunk) return false;
+    const s = this.plugin.settings;
+    const ext = (/\.([^./]+)$/.exec(rel) || [])[1] || '';
+    const reencode = !!s.reencodeVideos && (caps.videoReencode || []).includes(ext.toLowerCase()) &&
+      local.size > (s.reencodeOverMB > 0 ? s.reencodeOverMB : 50) * MB;
+
+    const media = (method, endpoint, opts) => this.plugin.request(method, 'media/upload/' + endpoint, opts);
+    const name = rel.slice(rel.lastIndexOf('/') + 1);
+    const reader = await this.openReader(local.file);
+    let finished;
+    try {
+      const start = await media('POST', 'start', { json: { vault: this.vaultId, path: rel, size: local.size, overwrite: true, reencode } });
+      const step = start.chunk > 0 ? start.chunk : caps.uploadChunk;
+      for (let offset = 0; offset < local.size; offset += step) {
+        this.plugin.setProgress(this, name, offset / local.size);
+        const body = await reader.read(offset, Math.min(step, local.size - offset));
+        for (let attempt = 1; ; attempt++) {
+          try {
+            await media('PUT', 'chunk', { query: { id: start.id, offset }, body, contentType: 'application/octet-stream' });
+            break;
+          } catch (err) {
+            // A dropped connection: the same piece again. Anything the
+            // server itself refused won't get better.
+            if (err instanceof HttpError && err.status < 500 || attempt >= CHUNK_RETRIES) throw err;
+            await new Promise((r) => setTimeout(r, 1000 * attempt));
+          }
+        }
+      }
+      finished = await media('POST', 'finish', { json: { id: start.id } });
+    } finally {
+      this.plugin.setProgress(this, null);
+      await reader.close().catch(() => {});
+    }
+    this.state.files[rel] = finished.reencoding
+      ? { rm: 0, rs: 0, lm: local.mtime, ls: local.size, enc: 1 }
+      : { rm: finished.mtime, rs: finished.size, lm: local.mtime, ls: local.size };
+    return true;
+  }
+
   // Into the server vault's .trash/, like Obsidian's own "move to trash".
   async trashRemote(rel) {
     let target = trashPath(rel);
@@ -649,10 +754,28 @@ class LinkSync {
       case 'none':
         return;
       case 'forget':
+        // Deleted or renamed here while the server was re-encoding it: it
+        // must not turn up there afterwards.
+        if (st.files[rel] && st.files[rel].enc) {
+          await this.plugin.request('POST', 'media/upload/encoding/cancel', { json: { vault: this.vaultId, path: rel } }).catch(() => {});
+        }
         delete st.files[rel];
         this.texts.delete(rel);
         break;
+      case 'adopt':
+        // The server's re-encoding of what is here: both are in sync as they are.
+        st.files[rel] = { rm: remote.mtime, rs: remote.size, lm: st.files[rel].lm, ls: st.files[rel].ls };
+        break;
+      case 'await-encode':
+        // Not on the server yet. If it isn't re-encoding it either (it was
+        // restarted without its data, say), upload again on the next pass.
+        if (!(await this.serverEncoding()).has(rel)) {
+          delete st.files[rel];
+          this.schedulePath(rel, 1000);
+        }
+        break;
       case 'upload': {
+        if (await this.uploadLarge(rel, local)) break;
         const buf = await this.app.vault.readBinary(local.file);
         const r = await this.upload(rel, buf);
         st.files[rel] = { rm: r.mtime, rs: r.size, lm: local.mtime, ls: local.size };
@@ -1232,6 +1355,8 @@ class LinkSync {
   describe() {
     const parts = [this.status];
     if (this.pendingOps) parts.push(this.pendingOps + ' pending');
+    const encoding = Object.keys(this.state.files).filter((r) => this.state.files[r].enc).length;
+    if (encoding) parts.push(encoding + ' being re-encoded on the server');
     if (this.lastFullSync) parts.push('checked ' + new Date(this.lastFullSync).toLocaleTimeString());
     if (this.lastError) parts.push('last error: ' + this.lastError);
     return parts.join(' · ');
@@ -1294,6 +1419,8 @@ class MarkportSyncPlugin extends obsidian.Plugin {
     this.authFailed = false;
     this.saveTimer = null;
     this.confirming = Promise.resolve();
+    this.progress = new Map();   // LinkSync → { name, fraction } of a large upload
+    this.capsCache = null;
 
     this.statusEl = this.addStatusBarItem();
     this.statusEl.addClass('markport-sync-status');
@@ -1450,6 +1577,7 @@ class MarkportSyncPlugin extends obsidian.Plugin {
   }
 
   restartLinks() {
+    this.capsCache = null;
     this.authFailed = false;
     this.startLinks();
   }
@@ -1514,13 +1642,37 @@ class MarkportSyncPlugin extends obsidian.Plugin {
     else {
       const pending = all.reduce((n, l) => n + l.pendingOps, 0);
       const offline = all.filter((l) => l.status !== 'live').length;
-      if (pending) text = 'Markport: syncing ' + pending;
+      const up = [...this.progress.values()][0];
+      if (up) text = 'Markport: uploading ' + up.name + ' ' + Math.floor(up.fraction * 100) + '%' + (pending > 1 ? ' (+' + (pending - 1) + ')' : '');
+      else if (pending) text = 'Markport: syncing ' + pending;
       else if (offline === all.length) text = 'Markport: offline';
       else if (offline) text = 'Markport: ' + (all.length - offline) + '/' + all.length + ' live';
       else text = 'Markport: synced';
     }
     this.statusEl.setText(text);
     if (this.settingTab && this.settingTab.refreshStatusLines) this.settingTab.refreshStatusLines();
+  }
+
+  // A large upload in progress, for the status bar. name null = done.
+  setProgress(link, name, fraction) {
+    if (name == null) this.progress.delete(link);
+    else this.progress.set(link, { name, fraction });
+    this.refreshStatus();
+  }
+
+  // What the server's media service can do (pieces, re-encoding), or null
+  // for a server without it. Asked again after a while, and on reconnect.
+  async mediaCaps() {
+    const c = this.capsCache;
+    if (c && Date.now() - c.at < 10 * 60e3) return c.caps;
+    let caps = null;
+    try {
+      caps = await this.request('GET', 'media/caps');
+    } catch (err) {
+      if (!(err instanceof HttpError) || err.status === 401) throw err;
+    }
+    this.capsCache = { at: Date.now(), caps };
+    return caps;
   }
 
   // ── HTTP ──
@@ -1985,6 +2137,22 @@ class MarkportSyncSettingTab extends obsidian.PluginSettingTab {
       .addText((t) => t.setValue(String(s.intervalMin)).onChange(async (v) => {
         const n = parseInt(v, 10);
         if (n > 0) { s.intervalMin = n; await plugin.saveSettings(); }
+      }));
+
+    new obsidian.Setting(containerEl)
+      .setName('Re-encode large videos')
+      .setDesc('Have the server re-encode videos larger than the size below (mp4, m4v, mov, mkv) to H.264 when they are uploaded. ' +
+        'This device keeps its original; the server and your other devices get the smaller file. ' +
+        'Needs ffmpeg on the server. A video shows up there once it is re-encoded, which can take a while.')
+      .addToggle((tg) => tg.setValue(!!s.reencodeVideos).onChange(async (on) => {
+        s.reencodeVideos = on;
+        await plugin.saveSettings();
+      }));
+    new obsidian.Setting(containerEl)
+      .setName('Re-encode videos larger than (MB)')
+      .addText((t) => t.setValue(String(s.reencodeOverMB)).onChange(async (v) => {
+        const n = parseInt(v, 10);
+        if (n > 0) { s.reencodeOverMB = n; await plugin.saveSettings(); }
       }));
 
     const whole = s.links.find((l) => l.folder === '');

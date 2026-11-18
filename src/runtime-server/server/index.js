@@ -326,6 +326,7 @@ function createApp(appConfig = {}) {
       maxBytes: media.maxBytes,
       events: vaultEvents,
       housekeeping: media.housekeeping,
+      video: media.video,
     });
     app.use('/api/media', app.locals.media);
   }
