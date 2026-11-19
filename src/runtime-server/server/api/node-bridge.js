@@ -27,6 +27,7 @@ const childProcess = require('child_process');
 const express = require('express');
 const fs = require('fs');
 const os = require('os');
+const zlib = require('zlib');
 const { WebSocketServer } = require('ws');
 
 const HEADER = 'x-markport-bridge';
@@ -80,17 +81,21 @@ function decode(v) {
 }
 
 // Resolve "fs.readFileSync" / "fs.promises.readFile" / "os.homedir" /
-// "child_process.execFileSync" to a function. Only these namespaces exist.
+// "child_process.execFileSync" / "zlib.gunzipSync" to a function. Only these
+// namespaces exist. zlib is its one-shot functions (the client's callback
+// forms call them too); its streams have no state to keep here.
 function resolveFn(mod, fn) {
   let target;
   if (mod === 'fs') target = fs;
   else if (mod === 'fs.promises') target = fs.promises;
   else if (mod === 'os') target = os;
   else if (mod === 'child_process') target = childProcess;
+  else if (mod === 'zlib') target = zlib;
   else return null;
   if (typeof fn !== 'string' || !Object.prototype.hasOwnProperty.call(target, fn)) return null;
   if ((mod === 'fs' || mod === 'fs.promises') && FS_DENY.has(fn)) return null;
   if (mod === 'child_process' && !/Sync$/.test(fn)) return null;   // async processes go over the WebSocket
+  if (mod === 'zlib' && !/Sync$/.test(fn)) return null;
   const f = target[fn];
   return typeof f === 'function' ? f.bind(target) : null;
 }
@@ -128,6 +133,7 @@ function info(vaultRegistry, vaultId) {
       release: os.release(), EOL: os.EOL, arch: os.arch(), platform: os.platform(),
       cpus: os.cpus().length, totalmem: os.totalmem(), userInfo,
     },
+    zlib: { constants: zlib.constants },
     vaultPath: vault ? vault.path : null,
   };
 }

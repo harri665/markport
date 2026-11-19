@@ -697,6 +697,21 @@ window.__owInstallNodeBridge = function () {
   function unavailable(name) {
     return new Proxy({}, { get: function (t, k) { if (k === '__esModule' || typeof k === 'symbol') return undefined; return function () { throw new Error('[node-bridge] ' + name + '.' + String(k) + ' is not available in Markport'); }; } });
   }
+  // zlib: the one-shot functions, run on the server - a plugin that unpacks
+  // data bundled into its own code (Claudian: brotliDecompressSync at load)
+  // can't start without them. The callback forms go the same way. Streams
+  // (createGzip, ...) stay unavailable, as the rest of the module was.
+  var zlibFns = { constants: (INFO.zlib && INFO.zlib.constants) || {} };
+  Object.keys(zlibFns.constants).forEach(function (k) { if (/^Z_/.test(k)) zlibFns[k] = zlibFns.constants[k]; });
+  ['gzip', 'gunzip', 'deflate', 'inflate', 'deflateRaw', 'inflateRaw', 'unzip', 'brotliCompress', 'brotliDecompress', 'zstdCompress', 'zstdDecompress'].forEach(function (fn) {
+    zlibFns[fn + 'Sync'] = function (buf, o) { return callSync('zlib', fn + 'Sync', [buf, o]); };
+    zlibFns[fn] = function (buf, o, cb) {
+      if (typeof o === 'function') { cb = o; o = undefined; }
+      callAsync('zlib', fn + 'Sync', [buf, o]).then(function (r) { cb(null, r); }, function (e) { cb(e); });
+    };
+  });
+  var zlibRest = unavailable('zlib');
+  var zlibMod = new Proxy(zlibFns, { get: function (t, k) { return Object.prototype.hasOwnProperty.call(t, k) ? t[k] : zlibRest[k]; } });
   function notFound(n) { var e = new Error("Cannot find module '" + n + "'"); e.code = 'MODULE_NOT_FOUND'; return e; }
   var moduleMod = {
     createRequire: function () {
@@ -739,7 +754,7 @@ window.__owInstallNodeBridge = function () {
     path: pathMod, url: urlMod, async_hooks: { AsyncLocalStorage: AsyncLocalStorage, AsyncResource: class { runInAsyncScope(fn, self) { return fn.apply(self, Array.prototype.slice.call(arguments, 2)); } } },
     module: moduleMod, timers: { setTimeout: setTimeout.bind(window), clearTimeout: clearTimeout.bind(window), setInterval: setInterval.bind(window), clearInterval: clearInterval.bind(window), setImmediate: function (f) { return setTimeout(f, 0); } },
     'timers/promises': { setTimeout: function (ms, v) { return new Promise(function (r) { setTimeout(function () { r(v); }, ms); }); } },
-    zlib: unavailable('zlib'), http: unavailable('http'), https: unavailable('https'), net: unavailable('net'), tls: unavailable('tls'),
+    zlib: zlibMod, http: unavailable('http'), https: unavailable('https'), net: unavailable('net'), tls: unavailable('tls'),
   };
   Object.keys(install).forEach(function (k) { modules[k] = install[k]; modules['node:' + k] = install[k]; });
   // 'original-fs' stays unregistered on purpose: the bundle uses it to pick

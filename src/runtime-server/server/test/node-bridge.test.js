@@ -85,9 +85,22 @@ test('fs round-trips buffers, stats, dirents and errors', async (t) => {
   assert.equal(r.err.$e.code, 'ENOENT');
 });
 
+test('zlib: one-shot functions round-trip, and info carries the constants', async (t) => {
+  const { base } = await start(t, true);
+  const packed = require('zlib').brotliCompressSync(Buffer.from('{"a":1}'));
+  let r = await (await call(base, 'zlib', 'brotliDecompressSync', [{ $b: packed.toString('base64') }])).json();
+  assert.equal(Buffer.from(r.ok.$b, 'base64').toString(), '{"a":1}');
+  r = await (await call(base, 'zlib', 'gzipSync', ['hello', { level: 9 }])).json();
+  assert.equal(require('zlib').gunzipSync(Buffer.from(r.ok.$b, 'base64')).toString(), 'hello');
+  r = await (await call(base, 'zlib', 'gunzipSync', [{ $b: Buffer.from('not gzip').toString('base64') }])).json();
+  assert.equal(r.err.$e.code, 'Z_DATA_ERROR');
+  const info = await (await fetch(base + '/api/node-bridge/info')).json();
+  assert.equal(info.zlib.constants.Z_SYNC_FLUSH, require('zlib').constants.Z_SYNC_FLUSH);
+});
+
 test('stateful or unknown functions are refused', async (t) => {
   const { base } = await start(t, true);
-  for (const [mod, fn] of [['fs', 'watch'], ['fs', 'createReadStream'], ['fs', 'constructor'], ['child_process', 'spawn'], ['net', 'connect']]) {
+  for (const [mod, fn] of [['fs', 'watch'], ['fs', 'createReadStream'], ['fs', 'constructor'], ['child_process', 'spawn'], ['net', 'connect'], ['zlib', 'createGzip'], ['zlib', 'gunzip']]) {
     assert.equal((await call(base, mod, fn, [])).status, 400, `${mod}.${fn}`);
   }
 });

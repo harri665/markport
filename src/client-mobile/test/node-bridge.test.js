@@ -197,3 +197,23 @@ test('process and os reflect the server', () => {
   const fromPlugin = vm.runInContext('(function readIt() { return app.vault.adapter.basePath; })\n//# sourceURL=plugin:realclaudian', win);
   assert.equal(fromPlugin(), '/data/vaults/Notes');
 });
+
+test('zlib: one-shot functions run on the server, sync and with a callback; streams are refused', async () => {
+  const zlib = require('zlib');
+  const onCall = (req) => {
+    assert.equal(req.mod, 'zlib');
+    return { ok: { $b: zlib[req.fn](Buffer.from(req.args[0].$b, 'base64')).toString('base64') } };
+  };
+  const { m, calls } = sandbox({ info: { zlib: { constants: zlib.constants } }, onCall });
+  const B = m.buffer.Buffer;
+  const packed = zlib.brotliCompressSync(Buffer.from('{"a":1}')).toString('base64');
+  assert.equal(m.zlib.brotliDecompressSync(B.from(packed, 'base64')).toString('utf8'), '{"a":1}');
+  assert.equal(calls[0].fn, 'brotliDecompressSync');
+  const out = await new Promise((res, rej) => m['node:zlib'].gzip(B.from('hello'), (e, r) => (e ? rej(e) : res(r))));
+  assert.equal(zlib.gunzipSync(Buffer.from(out)).toString(), 'hello');
+  assert.equal(calls[1].fn, 'gzipSync');
+  assert.equal(m.zlib.constants.BROTLI_OPERATION_FLUSH, zlib.constants.BROTLI_OPERATION_FLUSH);
+  assert.equal(m.zlib.Z_DEFAULT_WINDOWBITS, zlib.constants.Z_DEFAULT_WINDOWBITS);
+  assert.equal(typeof m.zlib.createBrotliDecompress, 'function');
+  assert.throws(() => m.zlib.createGzip(), /zlib\.createGzip is not available/);
+});
