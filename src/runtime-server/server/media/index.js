@@ -249,8 +249,11 @@ function createMediaRouter(vaultRegistry, opts = {}) {
 
   // ── models ──
 
+  // '-2': the model pipeline's own version (2 = dense meshes simplified, see
+  // worker.js), so models optimized before are redone without touching the
+  // image thumbnails that share the cache key.
   function modelFiles(src) {
-    return { glb: cache.file('model', src.key, '.glb'), err: cache.file('model', src.key, '.err') };
+    return { glb: cache.file('model', src.key, '-2.glb'), err: cache.file('model', src.key, '-2.err') };
   }
 
   function optimize(src, input, cleanup) {
@@ -260,7 +263,7 @@ function createMediaRouter(vaultRegistry, opts = {}) {
         if (await cache.has(f.glb)) return;
         const tmp = cache.tmpFile('.glb');
         await fsp.mkdir(path.dirname(tmp), { recursive: true });
-        await pool.run('model', { input, output: tmp, maxTexture: opts.maxTexture || 2048 });
+        await pool.run('model', { input, output: tmp, maxTexture: opts.maxTexture || 2048, maxTriangles: opts.maxTriangles || 500000 });
         await cache.adopt(tmp + '.br', f.glb + '.br');
         await cache.adopt(tmp, f.glb);
       } catch (e) {

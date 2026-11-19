@@ -8,8 +8,10 @@
   },
   "devDependencies": {
     "ag-psd": "34.1.0",
+    "docx-preview": "0.4.1",
     "esbuild": "0.28.2",
     "fflate": "0.8.3",
+    "jszip": "3.10.1",
     "libheif-js": "^1.23.5",
     "three": "0.187.0",
     "utif2": "4.1.0"

@@ -1981,6 +1981,236 @@ class MediaFileView extends (obsidian.FileView || obsidian.ItemView) {
   async onClose() { this.unmount(); }
 }
 
+const DOCX_VIEW = 'markport-docx';
+
+const DOCX_MODE_KEY = 'markport-docx-mode';
+
+// A tab for a Word document (.docx), in one of two modes:
+//   preview  drawn by docx-preview (vendor-docx.js): pages keep their Word
+//            size and are scaled down to fit a narrow pane. Only reads.
+//   edit     docx-editor.js: text, paragraph styles, bold / italic /
+//            underline / strike, alignment, list levels and table rows,
+//            saved back into the file a second after typing stops (and on
+//            Ctrl/Cmd+S, switching back, or closing the tab). Untouched
+//            parts of the document are written back exactly as they were.
+// The toggle in the tab header switches; the last mode used is remembered.
+class DocxView extends (obsidian.FileView || obsidian.ItemView) {
+  constructor(leaf, plugin) {
+    super(leaf);
+    this.plugin = plugin;
+    this.seq = 0;
+    this.ro = null;
+    this.editor = null;
+    this.editorFile = null;
+    this.saveTimer = null;
+    this.saving = null;
+    this.wroteAt = 0;
+    let mode = null;
+    try { mode = this.app.loadLocalStorage && this.app.loadLocalStorage(DOCX_MODE_KEY); } catch (_) { /* none */ }
+    this.mode = mode === 'edit' ? 'edit' : 'preview';
+  }
+  getViewType() { return DOCX_VIEW; }
+  getDisplayText() { return this.file ? this.file.basename : 'Word document'; }
+  getIcon() { return 'file-text'; }
+  canAcceptExtension(ext) { return String(ext).toLowerCase() === 'docx'; }
+
+  async onOpen() {
+    this.registerEvent(this.app.vault.on('modify', (f) => {
+      if (!this.file || f.path !== this.file.path) return;
+      if (Date.now() - this.wroteAt < 3000) return;      // our own save
+      if (this.editor && this.editor.isDirty()) {
+        new obsidian.Notice(f.name + ' changed on disk while you were editing it. Your edits are kept; saving will overwrite the other change.', 8000);
+        return;
+      }
+      this.render(f);
+    }));
+    if (typeof this.addAction === 'function') {
+      this.modeBtn = this.addAction('pencil', 'Edit document', () => this.toggleMode());
+      this.showMode();
+    }
+  }
+
+  showMode() {
+    if (!this.modeBtn) return;
+    const editing = this.mode === 'edit';
+    obsidian.setIcon(this.modeBtn, editing ? 'book-open' : 'pencil');
+    this.modeBtn.setAttribute('aria-label', editing ? 'Preview (stop editing)' : 'Edit document');
+  }
+
+  async toggleMode() {
+    if (this.mode === 'edit') await this.flush();
+    this.mode = this.mode === 'edit' ? 'preview' : 'edit';
+    try { if (this.app.saveLocalStorage) this.app.saveLocalStorage(DOCX_MODE_KEY, this.mode); } catch (_) { /* not kept */ }
+    this.showMode();
+    if (this.file) await this.render(this.file);
+  }
+
+  async onLoadFile(file) { await this.render(file); }
+
+  async render(file) {
+    if (this.mode === 'edit') return this.renderEditor(file);
+    this.dropEditor();
+    return this.renderPreview(file);
+  }
+
+  async renderEditor(file) {
+    const seq = ++this.seq;
+    const root = this.contentEl;
+    root.addClass('mpl-docx-view');
+    if (!this.editor) { root.empty(); root.createDiv({ cls: 'mpl-docx-status', text: 'Opening ' + file.name + ' for editing…' }); }
+    try {
+      const [lib, ed, data] = await Promise.all([
+        this.plugin.media.loadVendor(VENDOR.docx),
+        this.plugin.media.loadVendor(VENDOR.docxEditor),
+        this.app.vault.readBinary(file),
+      ]);
+      if (seq !== this.seq) return;
+      const editor = await ed.open(data, {
+        JSZip: lib.JSZip,
+        setIcon: obsidian.setIcon,
+        onChange: () => this.scheduleSave(),
+        onSave: () => this.flush(),
+      });
+      if (seq !== this.seq) { editor.destroy(); return; }
+      const top = root.scrollTop;
+      this.dropEditor();
+      root.empty();
+      root.append(editor.el);
+      root.scrollTop = top;
+      this.editor = editor;
+      this.editorFile = file;
+    } catch (e) {
+      if (seq !== this.seq) return;
+      console.warn('[markport-clipper] could not open for editing', file.path, e);
+      this.dropEditor();
+      root.empty();
+      root.createDiv({
+        cls: 'mpl-docx-status',
+        text: /zip|central directory|end of data/i.test(String(e && e.message))
+          ? file.name + ' is not a .docx file (an older .doc, or damaged), so it cannot be edited here.'
+          : 'Could not open ' + file.name + ' for editing: ' + ((e && e.message) || e),
+      });
+    }
+  }
+
+  scheduleSave() {
+    if (!this.editor) return;
+    this.editor.setStatus('Edited');
+    clearTimeout(this.saveTimer);
+    this.saveTimer = setTimeout(() => this.flush(), 1000);
+  }
+
+  // Write the editor's changes to the file, one save at a time.
+  async flush() {
+    clearTimeout(this.saveTimer);
+    this.saveTimer = null;
+    while (this.saving) await this.saving;
+    const ed = this.editor;
+    const file = this.editorFile;
+    if (!ed || !file || !ed.isDirty()) return;
+    this.saving = (async () => {
+      try {
+        ed.setStatus('Saving…');
+        const buf = await ed.save();
+        this.wroteAt = Date.now();
+        await this.app.vault.modifyBinary(file, buf);
+        this.wroteAt = Date.now();
+        ed.setStatus(ed.isDirty() ? 'Edited' : 'Saved');
+      } catch (e) {
+        console.warn('[markport-clipper] could not save', file.path, e);
+        ed.setStatus('Not saved');
+        new obsidian.Notice('Could not save ' + file.name + ': ' + ((e && e.message) || e), 10000);
+      }
+    })();
+    try { await this.saving; } finally { this.saving = null; }
+  }
+
+  dropEditor() {
+    clearTimeout(this.saveTimer);
+    this.saveTimer = null;
+    if (this.editor) this.editor.destroy();
+    this.editor = null;
+    this.editorFile = null;
+  }
+
+  async renderPreview(file) {
+    const seq = ++this.seq;
+    const root = this.contentEl;
+    root.addClass('mpl-docx-view');
+    const status = (text) => { root.empty(); root.createDiv({ cls: 'mpl-docx-status', text }); };
+    if (!root.querySelector('.mpl-docx-body')) status('Opening ' + file.name + '…');
+    try {
+      const [lib, data] = await Promise.all([
+        this.plugin.media.loadVendor(VENDOR.docx),
+        this.app.vault.readBinary(file),
+      ]);
+      if (seq !== this.seq) return;
+      // Draw off-screen, then swap in, so a re-render on save does not flash.
+      const body = document.createElement('div');
+      body.className = 'mpl-docx-body';
+      const style = document.createElement('div');
+      await lib.renderAsync(data, body, style, {
+        className: 'docx',
+        inWrapper: true,
+        breakPages: true,
+        ignoreLastRenderedPageBreak: true,
+        renderHeaders: true,
+        renderFooters: true,
+        renderFootnotes: true,
+        renderEndnotes: true,
+        renderComments: false,
+        renderChanges: false,
+        useBase64URL: true,     // images as data: URLs, nothing to revoke later
+        experimental: true,     // tab stops
+      });
+      if (seq !== this.seq) return;
+      const top = root.scrollTop;
+      root.empty();
+      root.append(style, body);
+      root.scrollTop = top;
+      this.fit();
+      if (!this.ro && window.ResizeObserver) {
+        this.ro = new ResizeObserver(() => this.fit());
+        this.ro.observe(root);
+      }
+    } catch (e) {
+      if (seq !== this.seq) return;
+      console.warn('[markport-clipper] could not render', file.path, e);
+      status(/zip|central directory|end of data/i.test(String(e && e.message))
+        ? file.name + ' is not a .docx file (an older .doc, or damaged), so it cannot be shown here.'
+        : 'Could not show ' + file.name + ': ' + ((e && e.message) || e));
+    }
+  }
+
+  // Scale the pages down (never up) to the pane's width.
+  fit() {
+    const root = this.contentEl;
+    const body = root.querySelector('.mpl-docx-body');
+    if (!body) return;
+    body.style.zoom = '';
+    const page = body.querySelector('section.docx');
+    if (!page) return;
+    const avail = root.clientWidth - 24;
+    const need = page.offsetWidth;
+    if (avail > 0 && need > avail) body.style.zoom = String(avail / need);
+  }
+
+  async onUnloadFile() {
+    await this.flush();
+    this.seq++;
+    this.dropEditor();
+    this.contentEl.empty();
+  }
+
+  async onClose() {
+    await this.flush();
+    this.seq++;
+    this.dropEditor();
+    if (this.ro) this.ro.disconnect();
+    this.ro = null;
+  }
+}
+
 class PinnedBoardView extends obsidian.ItemView {
   constructor(leaf, plugin) {
     super(leaf);
@@ -2051,6 +2281,8 @@ const VENDOR = {
   decoders: 'vendor-decoders.js',
   draco: 'vendor-draco-decoder.js',
   heif: 'vendor-heif.js',
+  docx: 'vendor-docx.js',
+  docxEditor: 'docx-editor.js',
   formats: 'media-formats.js',
 };
 
@@ -2295,6 +2527,22 @@ class MediaLibrary {
       })();
     }
     return this._draco;
+  }
+
+  // One Draco loader for every model: each DRACOLoader starts its own decoder
+  // workers, which stay alive until dispose(). A new loader per model left
+  // another set of workers (and decoder copies) behind every time one opened.
+  async dracoLoader(V) {
+    if (!this._dracoLoader) {
+      const url = await this.dracoUrl();
+      const manager = new V.THREE.LoadingManager();
+      manager.setURLModifier((u) => (/draco_decoder\.js$/.test(u) ? url : u));
+      const d = new V.DRACOLoader(manager);
+      d.setDecoderPath('https://markport.invalid/draco/');
+      if (d.setDecoderConfig) d.setDecoderConfig({ type: 'js' });
+      this._dracoLoader = d;
+    }
+    return this._dracoLoader;
   }
 
   // ── the index of media items ──
@@ -2681,9 +2929,8 @@ class MediaLibrary {
     const settled = new Promise((resolve) => { settle = resolve; });
     manager.onStart = () => { loading = true; };
     manager.onLoad = () => { loading = false; settle(); };
-    const draco = await this.dracoUrl();
+    const dracoLoader = await this.dracoLoader(V);
     manager.setURLModifier((url) => {
-      if (/draco_decoder\.js$/.test(url)) return draco;
       if (!url.startsWith('vault:')) return url;
       let rel = url.slice(6);
       try { rel = decodeURIComponent(rel); } catch (_) { /* keep */ }
@@ -2693,10 +2940,7 @@ class MediaLibrary {
     const base = 'vault:' + (folder ? folder + '/' : '');
     const gltfLoader = () => {
       const l = new V.GLTFLoader(manager);
-      const d = new V.DRACOLoader(manager);
-      d.setDecoderPath('https://markport.invalid/draco/');
-      if (d.setDecoderConfig) d.setDecoderConfig({ type: 'js' });
-      l.setDRACOLoader(d);
+      l.setDRACOLoader(dracoLoader);
       l.setMeshoptDecoder(V.MeshoptDecoder);
       return l;
     };
@@ -2832,6 +3076,7 @@ class MediaLibrary {
     for (const v of this.urls.values()) URL.revokeObjectURL(v.url);
     this.urls.clear();
     if (this._worker) this._worker.then((w) => w.terminate(), () => {});
+    if (this._dracoLoader) this._dracoLoader.dispose();
     if (this._draco) this._draco.then((u) => URL.revokeObjectURL(u), () => {});
   }
 }
@@ -2916,8 +3161,12 @@ class ModelStage {
     this.T = T;
     const o = opts || {};
     this.renderer = new T.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: !!o.offscreen, powerPreference: o.offscreen ? 'low-power' : 'high-performance' });
-    this.renderer.setPixelRatio(o.offscreen ? 1 : Math.min(2, window.devicePixelRatio || 1));
-    this.renderer.setSize(o.width || 300, o.height || 300, !o.offscreen);
+    this.offscreen = !!o.offscreen;
+    this.width = o.width || 300;
+    this.height = o.height || 300;
+    this.moving = false;
+    this.renderer.setPixelRatio(this.pixelRatio());
+    this.renderer.setSize(this.width, this.height, !o.offscreen);
     this.renderer.outputColorSpace = T.SRGBColorSpace;
     this.renderer.toneMapping = T.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.05;
@@ -2986,8 +3235,32 @@ class ModelStage {
     this.camera.lookAt(0, 0, 0);
   }
 
+  // How many device pixels to draw per CSS pixel. Every frame shades every
+  // pixel of the canvas (4x with antialiasing), so on a large or HiDPI
+  // screen the pixel count, more than the model, decides the frame time.
+  // While the model moves it is drawn at 1x; once it settles, one sharp frame
+  // follows at the screen's ratio (at most 2, and about 4 million pixels).
+  pixelRatio() {
+    if (this.offscreen) return 1;
+    const dpr = window.devicePixelRatio || 1;
+    if (this.moving) return Math.min(1, dpr);
+    const cap = Math.sqrt(4e6 / Math.max(1, this.width * this.height));
+    return Math.max(Math.min(1, dpr), Math.min(2, dpr, cap));
+  }
+
+  setMoving(on) {
+    if (this.moving === !!on) return;
+    this.moving = !!on;
+    const r = this.pixelRatio();
+    if (r !== this.renderer.getPixelRatio()) this.renderer.setPixelRatio(r);
+  }
+
   resize(w, hgt) {
     if (!(w > 0 && hgt > 0)) return;
+    this.width = w;
+    this.height = hgt;
+    const r = this.pixelRatio();
+    if (r !== this.renderer.getPixelRatio()) this.renderer.setPixelRatio(r);
     this.renderer.setSize(w, hgt, true);
     this.camera.aspect = w / hgt;
     this.camera.updateProjectionMatrix();
@@ -3062,7 +3335,8 @@ class ModelViewer {
     }
   }
 
-  // Render for a while (damping settles, auto-rotate keeps it going).
+  // Render for a while (damping settles, auto-rotate keeps it going): at a
+  // light pixel ratio while moving, then one full-quality frame at rest.
   kick() {
     this.until = performance.now() + 800;
     if (this.raf) return;
@@ -3070,8 +3344,10 @@ class ModelViewer {
       this.raf = null;
       if (this.dead || !this.stage) return;
       this.controls.update();
+      const going = this.controls.autoRotate || performance.now() < this.until;
+      this.stage.setMoving(going);
       this.stage.render();
-      if (this.controls.autoRotate || performance.now() < this.until) this.raf = requestAnimationFrame(tick);
+      if (going) this.raf = requestAnimationFrame(tick);
     };
     this.raf = requestAnimationFrame(tick);
   }
@@ -5381,6 +5657,9 @@ class MarkportClipperPlugin extends obsidian.Plugin {
         this.mediaExtensions.add(ext);
       } catch (_) { /* already registered elsewhere */ }
     }
+    // Word documents: preview and edit (see DocxView).
+    this.registerView(DOCX_VIEW, (leaf) => new DocxView(leaf, this));
+    try { this.registerExtensions(['docx'], DOCX_VIEW); } catch (_) { /* another plugin shows .docx */ }
   }
 
   // ── library metadata (tags, notes, clip sources, sizes), in data.json ────

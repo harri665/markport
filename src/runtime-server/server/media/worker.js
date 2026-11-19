@@ -10,7 +10,8 @@
  *           image bytes, for sharp to resize on the main thread.
  *
  *   model   optimize a glTF/GLB for the web with glTF-Transform: dedup,
- *           weld, resample, prune, WebP textures (at most maxTexture px),
+ *           weld, simplify dense meshes (to about maxTriangles in all),
+ *           resample, prune, WebP textures (at most maxTexture px),
  *           meshopt geometry compression. Writes the GLB and a Brotli copy.
  *
  * Neither touches the vault: inputs are read, outputs go to the cache.
@@ -89,30 +90,55 @@ async function gltfTools() {
   const { NodeIO } = require('@gltf-transform/core');
   const { ALL_EXTENSIONS } = require('@gltf-transform/extensions');
   const F = require('@gltf-transform/functions');
-  const { MeshoptEncoder, MeshoptDecoder } = require('meshoptimizer');
+  const { MeshoptEncoder, MeshoptDecoder, MeshoptSimplifier } = require('meshoptimizer');
   const draco3d = require('draco3dgltf');
   await MeshoptEncoder.ready;
   await MeshoptDecoder.ready;
+  await MeshoptSimplifier.ready;
   const io = new NodeIO().registerExtensions(ALL_EXTENSIONS).registerDependencies({
     'draco3d.decoder': await draco3d.createDecoderModule(),
     'meshopt.decoder': MeshoptDecoder,
     'meshopt.encoder': MeshoptEncoder,
   });
-  gltf = { io, F, MeshoptEncoder, sharp: require('sharp') };
+  gltf = { io, F, MeshoptEncoder, MeshoptSimplifier, sharp: require('sharp') };
   return gltf;
 }
 
-async function model({ input, output, maxTexture }) {
-  const { io, F, MeshoptEncoder, sharp } = await gltfTools();
+// Triangles drawn per frame across a document's triangle meshes.
+function countTriangles(doc) {
+  let n = 0;
+  for (const mesh of doc.getRoot().listMeshes()) {
+    for (const prim of mesh.listPrimitives()) {
+      if (prim.getMode() !== 4) continue;            // TRIANGLES only
+      const idx = prim.getIndices();
+      const pos = prim.getAttribute('POSITION');
+      n += (idx ? idx.getCount() : pos ? pos.getCount() : 0) / 3;
+    }
+  }
+  return n;
+}
+
+async function model({ input, output, maxTexture, maxTriangles }) {
+  const { io, F, MeshoptEncoder, MeshoptSimplifier, sharp } = await gltfTools();
   const doc = await io.read(input);
   // Draco input was decoded on read; the output uses meshopt only.
   for (const ext of doc.getRoot().listExtensionsUsed()) {
     if (ext.extensionName === 'KHR_draco_mesh_compression') ext.dispose();
   }
   const size = maxTexture || 2048;
+  await doc.transform(F.dedup(), F.weld());
+  // Scans and CAD exports often carry millions of triangles: on the GPU that
+  // is what makes orbiting slow on every device, laptops and phones alike.
+  // The web copy is simplified toward maxTriangles; the error bound (0.5% of
+  // each mesh's size) stops it before detail visibly changes, so a model
+  // that cannot get there without looking different keeps more triangles.
+  // The original file in the vault is never touched.
+  const limit = maxTriangles || 500000;
+  const triangles = countTriangles(doc);
+  if (triangles > limit) {
+    await doc.transform(F.simplify({ simplifier: MeshoptSimplifier, ratio: limit / triangles, error: 0.005 }));
+  }
   await doc.transform(
-    F.dedup(),
-    F.weld(),
     F.resample(),
     F.prune(),
     F.textureCompress({ encoder: sharp, targetFormat: 'webp', resize: [size, size], quality: 85 }),

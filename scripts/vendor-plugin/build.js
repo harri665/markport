@@ -12,6 +12,7 @@
  *   vendor-draco-decoder.js  Draco decoder, plain-JS build (for Draco glTFs)
  *   vendor-decoders.js       ag-psd (PSD/PSB), utif2 (TIFF), fflate (zip)
  *   vendor-heif.js           libheif-js (HEIC/HEIF), WebAssembly included
+ *   vendor-docx.js           docx-preview + JSZip (Word .docx viewer; docx-editor.js uses its JSZip)
  *   vendor-licenses.txt      their license notices
  *
  * The plugin reads a vendor file through the vault adapter and evaluates it
@@ -92,8 +93,14 @@ async function main() {
     export const versions = ${JSON.stringify({ 'ag-psd': pkg('ag-psd').version, utif2: pkg('utif2').version, fflate: pkg('fflate').version })};
   `, 'ag-psd, utif2, fflate');
 
+  await bundle('vendor-docx.js', `
+    export { renderAsync } from 'docx-preview';
+    export { default as JSZip } from 'jszip';
+    export const versions = ${JSON.stringify({ 'docx-preview': pkg('docx-preview').version, jszip: pkg('jszip').version })};
+  `, 'docx-preview, JSZip');
+
   const licenses = [];
-  for (const name of ['three', 'ag-psd', 'utif2', 'fflate', 'libheif-js']) {
+  for (const name of ['three', 'ag-psd', 'utif2', 'fflate', 'libheif-js', 'docx-preview', 'jszip']) {
     const dir = path.join(__dirname, 'node_modules', name);
     const file = fs.readdirSync(dir).find((f) => /^licen[cs]e/i.test(f));
     licenses.push('='.repeat(78) + '\n' + name + ' ' + pkg(name).version + (pkg(name).license ? ' (' + pkg(name).license + ')' : '') + '\n' + '='.repeat(78) + '\n\n'
