@@ -3,10 +3,10 @@
 /**
  * Markport - Share.
  *
- * Adds "Share link…" to the file menu of notes and folders (and a command for the
- * current note). A share is a link, /s/<id>, that shows the note or folder as
+ * Adds "Share link…" to the file menu of notes, other files and folders (and a
+ * command for the current file). A share is a link, /s/<id>, that shows it as
  * a static page; with "Can edit" the page also offers "Open in editor", a full
- * Obsidian editor that can reach only that note or folder. Links can have a
+ * Obsidian editor that can reach only that note, file or folder. Links can have a
  * password and an expiry date, and can be revoked at any time.
  *
  * The server does the enforcing (src/runtime-server/server/shares/); this
@@ -207,6 +207,8 @@ class ShareModal extends obsidian.Modal {
     super(app);
     this.file = file;
     this.isFolder = file instanceof obsidian.TFolder;
+    // 'folder' | 'note' | 'file' - for the wording only.
+    this.kind = this.isFolder ? 'folder' : file.extension === 'md' ? 'note' : 'file';
     this.permission = 'view';
     this.password = '';
     this.expires = '';
@@ -215,20 +217,22 @@ class ShareModal extends obsidian.Modal {
 
   async onOpen() {
     const name = sharePath(this.file) ? this.file.name.replace(/\.md$/i, '') : this.app.vault.getName();
-    this.titleEl.setText('Share ' + (this.isFolder ? 'folder' : 'note') + ' "' + name + '"');
+    this.titleEl.setText('Share ' + this.kind + ' "' + name + '"');
     this.contentEl.addClass('markport-share-modal');
     this.warningEl = this.contentEl.createDiv();
     this.contentEl.createEl('p', {
       cls: 'markport-share-hint',
       text: this.isFolder
         ? 'People with the link can see this folder and everything in it, and nothing else in your vault.'
-        : 'People with the link can see this note, and the images and files it embeds, and nothing else in your vault.',
+        : this.kind === 'note'
+          ? 'People with the link can see this note, and the images and files it embeds, and nothing else in your vault.'
+          : 'People with the link can see and download this file, and nothing else in your vault.',
     });
 
     this.contentEl.createEl('h4', { text: 'New link' });
     new obsidian.Setting(this.contentEl)
       .setName('Access')
-      .setDesc(this.isFolder ? '"Can edit" lets them create, edit, rename and delete notes inside this folder.' : '"Can edit" lets them edit this note.')
+      .setDesc(this.isFolder ? '"Can edit" lets them create, edit, rename and delete notes inside this folder.' : '"Can edit" lets them edit this ' + this.kind + '.')
       .addDropdown((d) => d.addOption('view', 'View only').addOption('edit', 'Can edit').setValue(this.permission).onChange((v) => { this.permission = v; }));
     new obsidian.Setting(this.contentEl)
       .setName('Password')
@@ -252,7 +256,7 @@ class ShareModal extends obsidian.Modal {
       .addButton((b) => b.setButtonText('Create link and copy').setCta().onClick(() => this.create(b)));
     this.createdEl = this.contentEl.createDiv();
 
-    this.contentEl.createEl('h4', { text: 'Links to this ' + (this.isFolder ? 'folder' : 'note') });
+    this.contentEl.createEl('h4', { text: 'Links to this ' + this.kind });
     this.listEl = this.contentEl.createDiv({ cls: 'markport-share-list' });
     await this.refresh();
   }
@@ -369,7 +373,7 @@ module.exports = class MarkportSharePlugin extends obsidian.Plugin {
 
     this.registerEvent(this.app.workspace.on('file-menu', (menu, file) => {
       removeNativeShare(menu);
-      const shareable = file instanceof obsidian.TFolder || (file instanceof obsidian.TFile && file.extension === 'md');
+      const shareable = file instanceof obsidian.TFolder || file instanceof obsidian.TFile;
       if (!shareable) return;
       menu.addItem((item) => item
         .setTitle('Share link…')
@@ -380,10 +384,10 @@ module.exports = class MarkportSharePlugin extends obsidian.Plugin {
 
     this.addCommand({
       id: 'share-current-note',
-      name: 'Share current note',
+      name: 'Share current file',
       checkCallback: (checking) => {
         const file = this.app.workspace.getActiveFile();
-        if (!file || file.extension !== 'md') return false;
+        if (!file) return false;
         if (!checking) new ShareModal(this.app, file).open();
         return true;
       },

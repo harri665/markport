@@ -164,3 +164,8 @@ a.mp-button:hover, .mp-form button:hover { background: var(--interactive-accent-
   .mp-nav-toggle { display: list-item; padding: 4px 8px; color: var(--text-muted); cursor: pointer; }
   .mp-share-content .markdown-preview-view { padding: 20px 16px 60px; }
 }
+
+.mp-file-meta { color: var(--text-muted); font-size: var(--font-ui-small); }
+.mp-file-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.mp-share-content .image-embed img, .mp-share-content .video-embed video { max-width: 100%; height: auto; }
+.mp-share-content .audio-embed audio { width: 100%; }

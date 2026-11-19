@@ -1596,7 +1596,7 @@ class MarkportSyncPlugin extends obsidian.Plugin {
     // Sharing (the server's /api/shares): a link to a synced note or folder,
     // as a read-only page or an editor limited to it. See ShareModal.
     this.registerEvent(this.app.workspace.on('file-menu', (menu, file) => {
-      const shareable = file instanceof obsidian.TFolder || (file instanceof obsidian.TFile && file.extension === 'md');
+      const shareable = file instanceof obsidian.TFolder || file instanceof obsidian.TFile;
       if (!shareable || !this.shareTargetFor(file)) return;
       menu.addItem((item) => item
         .setTitle('Share on Markport…')
@@ -1606,10 +1606,10 @@ class MarkportSyncPlugin extends obsidian.Plugin {
     }));
     this.addCommand({
       id: 'share-current-note',
-      name: 'Share current note on Markport',
+      name: 'Share current file on Markport',
       checkCallback: (checking) => {
         const file = this.app.workspace.getActiveFile();
-        if (!file || file.extension !== 'md' || !this.shareTargetFor(file)) return false;
+        if (!file || !this.shareTargetFor(file)) return false;
         if (!checking) new ShareModal(this.app, this, file).open();
         return true;
       },
@@ -2106,6 +2106,8 @@ class ShareModal extends obsidian.Modal {
     this.plugin = plugin;
     this.file = file;
     this.isFolder = file instanceof obsidian.TFolder;
+    // 'folder' | 'note' | 'file' - for the wording only.
+    this.kind = this.isFolder ? 'folder' : file.extension === 'md' ? 'note' : 'file';
     this.permission = 'view';
     this.password = '';
     this.expires = '';
@@ -2115,20 +2117,22 @@ class ShareModal extends obsidian.Modal {
   async onOpen() {
     const target = this.plugin.shareTargetFor(this.file);
     const name = target && !target.rel ? target.link.name : this.file.name.replace(/\.md$/i, '');
-    this.titleEl.setText('Share ' + (this.isFolder ? 'folder' : 'note') + ' "' + name + '"');
+    this.titleEl.setText('Share ' + this.kind + ' "' + name + '"');
     this.warningEl = this.contentEl.createDiv();
     this.contentEl.createEl('p', {
       cls: 'setting-item-description',
       text: (this.isFolder
         ? 'People with the link can see this folder and everything in it, and nothing else in your vault.'
-        : 'People with the link can see this note, and the images and files it embeds, and nothing else in your vault.') +
+        : this.kind === 'note'
+          ? 'People with the link can see this note, and the images and files it embeds, and nothing else in your vault.'
+          : 'People with the link can see and download this file, and nothing else in your vault.') +
         ' The link opens on ' + this.plugin.settings.serverUrl + '.',
     });
 
     this.contentEl.createEl('h4', { text: 'New link' });
     new obsidian.Setting(this.contentEl)
       .setName('Access')
-      .setDesc(this.isFolder ? '"Can edit" lets them create, edit, rename and delete notes inside this folder.' : '"Can edit" lets them edit this note.')
+      .setDesc(this.isFolder ? '"Can edit" lets them create, edit, rename and delete notes inside this folder.' : '"Can edit" lets them edit this ' + this.kind + '.')
       .addDropdown((d) => d.addOption('view', 'View only').addOption('edit', 'Can edit').setValue(this.permission).onChange((v) => { this.permission = v; }));
     new obsidian.Setting(this.contentEl)
       .setName('Password')
@@ -2151,7 +2155,7 @@ class ShareModal extends obsidian.Modal {
       .addButton((b) => b.setButtonText('Create link and copy').setCta().onClick(() => this.create(b)));
     this.createdEl = this.contentEl.createDiv();
 
-    this.contentEl.createEl('h4', { text: 'Links to this ' + (this.isFolder ? 'folder' : 'note') });
+    this.contentEl.createEl('h4', { text: 'Links to this ' + this.kind });
     this.listEl = this.contentEl.createDiv();
     await this.refresh();
   }

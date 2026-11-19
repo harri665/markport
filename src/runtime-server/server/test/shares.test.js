@@ -407,3 +407,29 @@ test('custom links with a password, and guessing is rate limited', async (t) => 
   // Once blocked, even a real link answers 429 for that client.
   assert.equal((await guesser.get('/s/plan')).status, 429);
 });
+
+test('any file can be shared: a page with a preview, and a download', async (t) => {
+  const { base, vaultId } = await start(t);
+  const me = await owner(base);
+  const png = await createShare(me, { vault: vaultId, path: 'attachments/diagram.png', permission: 'view' });
+  assert.equal(png.kind, 'file');
+  const guest = client(base);
+  const page = await guest.get('/s/' + png.id);
+  assert.equal(page.status, 200);
+  const html = await page.text();
+  assert.match(html, new RegExp('<img src="/s/' + png.id + '/raw/diagram.png"'));
+  assert.match(html, new RegExp('href="/s/' + png.id + '/raw/diagram.png\\?download=1"'));
+  assert.doesNotMatch(html, /unrelated|attachments/);
+
+  const inline = await guest.get('/s/' + png.id + '/raw/diagram.png');
+  assert.equal(inline.status, 200);
+  assert.equal(inline.headers.get('content-disposition'), null);
+  const dl = await guest.get('/s/' + png.id + '/raw/diagram.png?download=1');
+  assert.equal(dl.status, 200);
+  assert.match(dl.headers.get('content-disposition'), /attachment; filename="diagram.png"/);
+  assert.equal((await guest.get('/s/' + png.id + '/raw/unrelated.png')).status, 404);
+
+  // Hidden files are still refused, and a missing path is a 404.
+  assert.equal((await me.json('POST', '/api/shares', { vault: vaultId, path: '.obsidian/app.json', permission: 'view' })).status, 400);
+  assert.equal((await me.json('POST', '/api/shares', { vault: vaultId, path: 'nope.pdf', permission: 'view' })).status, 404);
+});

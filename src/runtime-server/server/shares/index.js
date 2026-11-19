@@ -124,8 +124,8 @@ function createSharing({ vaultRegistry, dataDir, auth }) {
       try { st = await fsp.stat(path.join(vault.path, ...(rel ? rel.split('/') : []))); } catch (_) {
         return res.status(404).json({ error: 'no such file or folder' });
       }
+      if (!st.isDirectory() && !st.isFile()) return res.status(400).json({ error: 'only files and folders can be shared' });
       const kind = st.isDirectory() ? 'folder' : 'file';
-      if (kind === 'file' && !rel.toLowerCase().endsWith('.md')) return res.status(400).json({ error: 'only notes and folders can be shared' });
       try {
         const share = shares.create({
           vault: body.vault,

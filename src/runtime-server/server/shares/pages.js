@@ -2,11 +2,13 @@
  * Public share pages, /s/<id>/...
  *
  *   (<id> is the share id or its custom link)
- *   GET  /s/<id>                 file share: the note; folder share: its index
+ *   GET  /s/<id>                 file share: the note, or a page for any other
+ *                                file (preview + download); folder share: its index
  *   GET  /s/<id>/n/<path>        a note (or subfolder) inside a folder share
  *   GET  /s/<id>/raw/<path>      a file inside the share (images, PDFs, ...),
  *                                or "Linked files/<name>" for an embedded
- *                                attachment that lives outside it
+ *                                attachment that lives outside it; ?download=1
+ *                                sends it as a download
  *   GET  /s/<id>/theme.css       the owner's theme + enabled CSS snippets
  *   GET  /s/<id>/edit?note=      edit shares: open the editor (/vault/<id>/...)
  *   POST /s/<id>/unlock          password-protected shares
@@ -25,7 +27,7 @@ const fsp = fs.promises;
 const path = require('path');
 
 const { vaultIndex, LINKED, ext } = require('./scope');
-const { renderNote, escapeHtml, encodePath, basenameNoMd } = require('./render');
+const { renderNote, escapeHtml, encodePath, basenameNoMd, IMAGE_EXT, AUDIO_EXT, VIDEO_EXT } = require('./render');
 const { shell, messagePage, unlockPage, pageHeaders } = require('./html');
 const { verifyPassword, ShareStore } = require('./store');
 const { createLimiter } = require('../auth');
@@ -210,6 +212,7 @@ function createSharePages({ shares, auth, scopes }) {
       const st = await fsp.stat(r.abs);
       if (!st.isFile()) throw Object.assign(new Error('not found'), { code: 'ENOENT' });
       res.set({ 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': RAW_CSP, 'Referrer-Policy': 'no-referrer' });
+      if (req.query.download) res.attachment(path.basename(r.abs));
       res.sendFile(r.abs, { dotfiles: 'allow' });
     } catch (err) {
       res.status(err.code === 'EACCES' ? 403 : 404).type('text/plain').send('Not found');
@@ -227,7 +230,10 @@ function createSharePages({ shares, auth, scopes }) {
   });
 
   router.get('/:id', access, (req, res, next) => {
-    if (req.scope.isFile) return renderNotePage(req, res, req.scope.share.path).catch(next);
+    if (req.scope.isFile) {
+      const rel = req.scope.share.path;
+      return (rel.toLowerCase().endsWith('.md') ? renderNotePage(req, res, rel) : renderFilePage(req, res, rel)).catch(next);
+    }
     renderFolderPage(req, res, '').catch(next);
   });
 
@@ -374,6 +380,25 @@ function createSharePages({ shares, auth, scopes }) {
     await layout(req, res, { vaultRel, isDir: false, title: basenameNoMd(vaultRel), contentHtml: html, index });
   }
 
+  // A shared file that isn't a note: an inline preview where the browser can
+  // show it (images, audio, video), plus Open and Download.
+  async function renderFilePage(req, res, vaultRel) {
+    const { scope } = req;
+    const st = await fsp.stat(path.join(scope.vaultRoot, ...vaultRel.split('/')));
+    const raw = basePath(scope.share) + '/raw/' + encodePath(scope.toShareRel(vaultRel));
+    const name = vaultRel.slice(vaultRel.lastIndexOf('/') + 1);
+    const e = ext(name);
+    let preview = '';
+    if (IMAGE_EXT.has(e)) preview = '<p class="internal-embed media-embed image-embed"><img src="' + escapeHtml(raw) + '" alt="' + escapeHtml(name) + '"></p>';
+    else if (AUDIO_EXT.has(e)) preview = '<p class="internal-embed media-embed audio-embed"><audio controls src="' + escapeHtml(raw) + '"></audio></p>';
+    else if (VIDEO_EXT.has(e)) preview = '<p class="internal-embed media-embed video-embed"><video controls src="' + escapeHtml(raw) + '"></video></p>';
+    const html = preview +
+      '<p class="mp-file-meta">' + escapeHtml(formatSize(st.size)) + '</p>' +
+      '<p class="mp-file-actions"><a class="mp-button" href="' + escapeHtml(raw) + '">Open</a> ' +
+      '<a class="mp-button" href="' + escapeHtml(raw + '?download=1') + '">Download</a></p>';
+    await layout(req, res, { vaultRel, isDir: false, title: name, contentHtml: html, index: null });
+  }
+
   async function renderFolderPage(req, res, vaultRel) {
     const { scope } = req;
     const index = await vaultIndex(scope.vaultRoot);
@@ -409,6 +434,14 @@ function createSharePages({ shares, auth, scopes }) {
   });
 
   return router;
+}
+
+function formatSize(n) {
+  if (n < 1024) return n + ' bytes';
+  const units = ['KB', 'MB', 'GB', 'TB'];
+  let i = -1;
+  do { n /= 1024; i++; } while (n >= 1024 && i < units.length - 1);
+  return (n < 10 ? n.toFixed(1) : Math.round(n)) + ' ' + units[i];
 }
 
 module.exports = { createSharePages, shareTitle, safeNext };

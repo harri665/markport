@@ -506,4 +506,4 @@ function rawEmbedTargets(text) {
 const MD_BREAKS = createMarkdown(true);
 const MD_STRICT = createMarkdown(false);
 
-module.exports = { renderNote, sanitize, escapeHtml, slugify, encodePath, basenameNoMd, preprocess, extractEmbedTargets, ATTACHMENT_EXT };
+module.exports = { renderNote, sanitize, escapeHtml, slugify, encodePath, basenameNoMd, preprocess, extractEmbedTargets, ATTACHMENT_EXT, IMAGE_EXT, AUDIO_EXT, VIDEO_EXT };
