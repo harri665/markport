@@ -223,6 +223,7 @@ gets them each time it connects, and edits apply without a restart.
 | `MARKPORT_OAUTH_CLIENT_HOSTS` | `claude.ai,claude.com,anthropic.com` | hosts an app's client id may point to (a client metadata document) |
 | `MARKPORT_MCP_PLAIN_PUNCTUATION` | `false` | `true`: refuse writes through MCP that add em/en dashes or emoji to notes |
 | `MARKPORT_MCP_INSTRUCTIONS_FILE` | `/data/mcp-instructions.md` | instructions sent to the app when it connects |
+| `MARKPORT_MCP_DEFAULT_VAULT` | *(none)* | with several vaults: the one (name or id) the app uses when it names none. Without it every call has to name a vault |
 | `MARKPORT_IMAGEMAGICK` | `true` | build the image with ImageMagick, for previews of HEIC, JPEG XL, JPEG 2000, EXR, HDR, DDS, XCF, BMP, ICO and more |
 | `MARKPORT_FFMPEG` | `true` | build the image with ffmpeg, so Markport Sync can have large videos re-encoded as they are uploaded (its "Re-encode large videos" setting, off by default) |
 | `MARKPORT_VIDEO_CRF` | `26` | quality of re-encoded videos: 18 (large files) to 32 (small) |

@@ -55,6 +55,7 @@ services:
       MARKPORT_OAUTH_CLIENT_HOSTS: ${MARKPORT_OAUTH_CLIENT_HOSTS:-claude.ai,claude.com,anthropic.com}
       MARKPORT_MCP_PLAIN_PUNCTUATION: ${MARKPORT_MCP_PLAIN_PUNCTUATION:-false}
       MARKPORT_MCP_INSTRUCTIONS_FILE: ${MARKPORT_MCP_INSTRUCTIONS_FILE:-}
+      MARKPORT_MCP_DEFAULT_VAULT: ${MARKPORT_MCP_DEFAULT_VAULT:-}
     volumes:
       - ${MARKPORT_DATA:-markport-data}:/data
     # If your proxy runs as a container on a shared Docker network instead of

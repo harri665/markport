@@ -215,7 +215,8 @@ test('the tools read, search and change a vault', async (t) => {
   const init = await call('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1' } });
   assert.equal(init.body.result.protocolVersion, '2025-06-18');
   assert.equal(init.body.result.serverInfo.name, 'markport');
-  assert.match(init.body.result.instructions, /list_vaults/);
+  assert.match(init.body.result.instructions, /^The user's Obsidian notes live here\./);
+  assert.match(init.body.result.instructions, /There is one vault, "Notes"\.\nIts top folders: Projects\./);
   assert.match(init.body.result.instructions, /end in -c\.md/);
   const note = await fetch(base + '/mcp', {
     method: 'POST', body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }),
@@ -235,7 +236,7 @@ test('the tools read, search and change a vault', async (t) => {
   const img = await tool('read_file', { path: 'pic.png' });
   assert.equal(img.content[0].type, 'image');
   assert.equal(img.content[0].mimeType, 'image/png');
-  assert.match(out(await tool('search', { query: 'ship' })), /Projects\/Plan\.md:3: Ship the thing\./);
+  assert.match(out(await tool('search', { query: 'ship' })), /^Projects\/Plan\.md\n  3: Ship the thing\.$/m);
 
   await tool('write_file', { path: 'Inbox/New.md', content: 'hello\n' });
   assert.equal(await fsp.readFile(path.join(vaultDir, 'Inbox', 'New.md'), 'utf8'), 'hello\n');
@@ -265,4 +266,90 @@ test('the tools read, search and change a vault', async (t) => {
   assert.equal((await call('resources/list')).body.error.code, -32601);
   const get = await fetch(base + '/mcp', { headers: { Authorization: 'Bearer ' + tokens.access_token } });
   assert.equal(get.status, 405);
+});
+
+test('the tools find notes from loose words, bare names and the default vault', async (t) => {
+  const { base, vaultDir, tmp } = await setup(t, { defaultVault: 'second' });
+  await fsp.mkdir(path.join(tmp, 'vaults', 'Second', 'Travel'), { recursive: true });
+  await fsp.mkdir(path.join(tmp, 'vaults', 'Second', 'Work'), { recursive: true });
+  const second = path.join(tmp, 'vaults', 'Second');
+  await fsp.writeFile(path.join(second, 'Travel', 'Trip planning.md'), '# Trip planning\n\nFlights to Japan in May.\nBook the hotel in Kyoto.\n');
+  await fsp.writeFile(path.join(second, 'Work', 'Log.md'), 'Planning meeting.\r\nTalked about a trip.\r\n');
+  await fsp.writeFile(path.join(second, 'Work', 'Japan.md'), 'Suppliers.\n');
+  await fsp.writeFile(path.join(second, 'Travel', 'Log.md'), 'Day one.\n');
+  await fsp.writeFile(path.join(vaultDir, 'Only here.md'), 'In the first vault.\n');
+  const { tokens } = await connect(base);
+  const call = rpc(base, tokens.access_token);
+  const tool = async (name, args) => (await call('tools/call', { name, arguments: args })).body.result;
+  const out = (res) => res.content.map((c) => c.text).join('');
+  // The second vault, as the start screen would open it.
+  const api = await (await fetch(base + '/api/auth/token', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: 'pw' }),
+  })).json();
+  const opened = await fetch(base + '/api/vaults/open', {
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Markport-Token': api.token },
+    body: JSON.stringify({ path: second }),
+  });
+  assert.equal(opened.status, 200);
+
+  // The app is told which vault holds the notes, and what is in it.
+  const init = await call('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1' } });
+  assert.match(init.body.result.instructions, /Vaults: .*Second/);
+  assert.match(init.body.result.instructions, /The notes are in "Second": leave vault out to use it\.\nIts top folders: Travel, Work\./);
+  assert.ok(init.body.result.instructions.length < 1000, 'leaves room for the owner\'s own instructions');
+  assert.match(out(await tool('list_vaults', {})), /\tSecond\t\(default\)$/m);
+
+  // No vault named: the default. A part of a vault's name is enough.
+  assert.match(out(await tool('list_files', {})), /^Travel\/Trip planning\.md\t/m);
+  assert.match(out(await tool('read_file', { vault: 'note', path: 'Only here.md' })), /first vault/);
+  assert.match(out(await tool('read_file', { vault: 'nope', path: 'x' })), /No vault "nope"/);
+
+  // Words in any order, anywhere in the note; the best match first.
+  const found = out(await tool('search', { query: 'japan trip' }));
+  assert.match(found, /^Travel\/Trip planning\.md {2}\(name matches\)\n {2}1: # Trip planning\n {2}3: Flights to Japan in May\.\n/);
+  assert.doesNotMatch(found, /Work\/Japan\.md/, 'has only one of the words');
+  assert.match(found, /1 of 4 notes in "Second" match\./);
+  assert.match(out(await tool('search', { query: '"trip planning" kyoto' })), /4: Book the hotel in Kyoto\./);
+  // No note with every word: the ones with some, said so.
+  const some = out(await tool('search', { query: 'japan zebra' }));
+  assert.match(some, /No note in "Second" has all of these words/);
+  assert.match(some, /Work\/Japan\.md/);
+  assert.match(out(await tool('search', { query: 'zebra' })), /No matches for "zebra" in the 4 notes of "Second".*another vault \(Notes\)/);
+  assert.match(out(await tool('search', { query: 'k[yi]oto', regex: true })), /Travel\/Trip planning\.md\n {2}4: Book the hotel/);
+
+  // A note's name is enough to read and edit it; the answer says where it is.
+  assert.match(out(await tool('read_file', { path: 'trip planning' })), /^\[Travel\/Trip planning\.md\]\n# Trip planning/);
+  assert.match(out(await tool('read_file', { path: 'Travel/Trip planning' })), /^\[Travel\/Trip planning\.md\]\n/);
+  assert.match(out(await tool('edit_file', { path: 'Trip planning.md', old_text: 'in May', new_text: 'in June' })), /Edited Travel\/Trip planning\.md/);
+  const two = await tool('read_file', { path: 'Log' });
+  assert.equal(two.isError, true);
+  assert.match(out(two), /2 files have that name; give the full path:\n {2}Travel\/Log\.md\n {2}Work\/Log\.md/);
+  assert.match(out(await tool('read_file', { path: 'Trips/Planning for Japan.md' })), /Close names:\n {2}Travel\/Trip planning\.md|Close names:\n {2}Work\/Japan\.md/);
+  // Moving and deleting take nothing for granted.
+  const gone = await tool('delete', { path: 'Trip planning' });
+  assert.equal(gone.isError, true);
+  assert.match(out(gone), /Did you mean:\n {2}Travel\/Trip planning\.md/);
+  // Appending to a bare name adds to the note of that name, or makes a new one.
+  assert.match(out(await tool('append_to_file', { path: 'Japan', content: 'More.' })), /to Work\/Japan\.md/);
+  assert.match(out(await tool('append_to_file', { path: 'Fresh.md', content: 'New.' })), /to Fresh\.md/);
+
+  // Windows line ends in the note, plain ones from the app.
+  await tool('edit_file', { path: 'Work/Log.md', old_text: 'meeting.\nTalked', new_text: 'meeting.\nSpoke' });
+  assert.equal(out(await tool('read_file', { path: 'Work/Log.md' })), 'Planning meeting.\r\nSpoke about a trip.\r\n');
+
+  // A long note comes in parts.
+  await tool('write_file', { path: 'Long.md', content: Array.from({ length: 3000 }, (_, i) => 'line ' + (i + 1) + ' ' + 'x'.repeat(40)).join('\n') });
+  const first = out(await tool('read_file', { path: 'Long.md' }));
+  assert.ok(first.length < 62000);
+  const next = Number(first.match(/\[lines 1 to \d+ of 3000; read on with offset: (\d+)\]$/)[1]);
+  const rest = out(await tool('read_file', { path: 'Long.md', offset: next, limit: 2 }));
+  assert.match(rest, new RegExp('^line ' + next + ' x+\\nline ' + (next + 1) + ' x+\\n\\n\\[lines ' + next + ' to ' + (next + 1) + ' of 3000; read on with offset: ' + (next + 2) + '\\]$'));
+
+  // A big folder comes back as its folders, not as thousands of lines.
+  await fsp.mkdir(path.join(second, 'Big', 'A'), { recursive: true });
+  await Promise.all(Array.from({ length: 450 }, (_, i) => fsp.writeFile(path.join(second, 'Big', i < 300 ? 'A' : '', 'n' + i + '.md'), '')));
+  const big = out(await tool('list_files', { folder: 'Big' }));
+  assert.match(big, /^450 files, 1 folders in Big\/: too many to list at once\.\n\nFolders:\nBig\/A\/\t300 files\n\nFiles directly in Big\/:\nBig\/n300\.md\t/);
+  assert.ok(big.split('\n').length < 170);
+  assert.match(out(await tool('list_files', { folder: 'Big/A' })), /300 files, 0 folders$/);
 });

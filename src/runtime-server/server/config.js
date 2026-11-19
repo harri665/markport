@@ -130,6 +130,9 @@ module.exports = {
     plainPunctuation: process.env.MARKPORT_MCP_PLAIN_PUNCTUATION === 'true',
     // Extra instructions for the app. Default: <data>/mcp-instructions.md.
     instructionsFile: process.env.MARKPORT_MCP_INSTRUCTIONS_FILE ? path.resolve(PROJECT_ROOT, process.env.MARKPORT_MCP_INSTRUCTIONS_FILE) : '',
+    // The vault (name or id) a tool call means when it names none. Without
+    // it, a server with several vaults needs the vault on every call.
+    defaultVault: process.env.MARKPORT_MCP_DEFAULT_VAULT || '',
   },
   bootstrap: {
     // Master switch. When false, /api/bootstrap returns { disabled: true }

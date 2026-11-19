@@ -194,6 +194,7 @@ function createApp(appConfig = {}) {
       dataDir,
       plainPunctuation: !!m.plainPunctuation,
       instructionsFile: m.instructionsFile,
+      defaultVault: m.defaultVault,
       version: require('./package.json').version,
     }));
     app.locals.oauth = oauth;
