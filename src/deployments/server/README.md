@@ -214,7 +214,8 @@ gets them each time it connects, and edits apply without a restart.
 | `DEFAULT_VAULT_NAME` | `Notes` | vault created when there is none |
 | `WATCH_POLLING` | `false` | `true` for network filesystems |
 | `OBSIDIAN_VERSION` | `1.12.7` | Obsidian release to bundle; 1.13+ does not boot |
-| `MARKPORT_NODE_BRIDGE` | `false` | `true`: desktop-only plugins run their Node code in the container, and Claude Code is installed in the image. See below |
+| `MARKPORT_NODE_BRIDGE` | *(on with a password)* | desktop-only plugins run their Node code in the container when you use the browser app. Unset: on when `MARKPORT_PASSWORD` is set, off without one. `false`: off. `true`: on regardless. See below |
+| `INSTALL_CLAUDE_CODE` | *(follows the bridge)* | build the image with Claude Code, for Claudian; `false` leaves it out |
 | `MARKPORT_MEDIA_CACHE_MB` | `5120` | size cap of the image library's cache (`/data/media-cache`): thumbnails, previews and web-optimized 3D models. Never inside a vault; safe to delete |
 | `MARKPORT_MCP` | `true` | the MCP endpoint at `/mcp` (needs `MARKPORT_PASSWORD`). See [Connecting Claude](#connecting-claude) |
 | `MARKPORT_PUBLIC_URL` | *(from each request)* | the address apps reach the server at, e.g. `https://notes.example.com` |
@@ -297,22 +298,29 @@ Two things differ from desktop Obsidian:
 
 ### Node bridge (desktop-only plugins such as Claudian)
 
-With `MARKPORT_NODE_BRIDGE=true` a plugin's `require('fs')`, `require('child_process')`,
+With the node bridge on, a plugin's `require('fs')`, `require('child_process')`,
 `require('os')` and so on run **in the container**. A plugin acts as if Obsidian were installed
 there: the vault is its folder under `/data/vaults`, and processes run as the container's `node`
 user.
 
-> **This lets anyone who can open the site run shell commands in the container**, and read or
-> change everything on `/data`. Only enable it with authentication in the reverse proxy. The
-> bridge refuses requests from other websites (cross-origin), but it has no login of its own.
+It only exists for the browser app. The native Obsidian app (desktop, with or without Markport
+Sync) has Node of its own, runs these plugins itself and never talks to the bridge.
+
+It is **on by default when `MARKPORT_PASSWORD` is set**: the bridge is one of the owner-only
+`/api` routes, so only the signed-in owner can use it, and share links can't. Without a password
+it is off by default. `MARKPORT_NODE_BRIDGE=false` turns it off; `=true` forces it on.
+
+> **Forced on without a password, it lets anyone who can open the site run shell commands in the
+> container**, and read or change everything on `/data`. Only do that with authentication in the
+> reverse proxy. The bridge also refuses requests from other websites (cross-origin).
 
 **Claudian** (Claude Code in a sidebar):
 
 ```bash
 # .env
-MARKPORT_NODE_BRIDGE=true
+MARKPORT_PASSWORD=...               # the bridge is on with a password
 
-docker compose up -d --build        # rebuild: installs Claude Code in the image
+docker compose up -d --build        # the image includes Claude Code
 docker compose exec -it markport claude    # log in once; kept in /data/home
 docker compose exec markport node /app/scripts/install-plugin.js /data/vaults/Notes YishenTu/claudian 2.1.4 --enable
 ```

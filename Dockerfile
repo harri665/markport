@@ -47,7 +47,7 @@ COPY --from=obsidian /build/vendor/obsidian-mobile vendor/obsidian-mobile
 COPY --from=obsidian /build/src/client-mobile/obsidian-version.js src/client-mobile/obsidian-version.js
 
 # Optional: Claude Code CLI, for the Claudian plugin through the node bridge
-# (MARKPORT_NODE_BRIDGE=true). git and ripgrep are what Claude Code uses to
+# (docker-compose.yml installs it unless the bridge is turned off). git and ripgrep are what Claude Code uses to
 # work in the vault folder.
 ARG INSTALL_CLAUDE_CODE=false
 RUN if [ "$INSTALL_CLAUDE_CODE" = "true" ]; then \

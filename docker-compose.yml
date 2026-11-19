@@ -14,7 +14,9 @@ services:
       context: .
       args:
         OBSIDIAN_VERSION: ${OBSIDIAN_VERSION:-1.12.7}
-        INSTALL_CLAUDE_CODE: ${MARKPORT_NODE_BRIDGE:-false}
+        # Claude Code, for Claudian through the node bridge. Follows
+        # MARKPORT_NODE_BRIDGE unless INSTALL_CLAUDE_CODE says otherwise.
+        INSTALL_CLAUDE_CODE: ${INSTALL_CLAUDE_CODE:-${MARKPORT_NODE_BRIDGE:-true}}
         INSTALL_IMAGEMAGICK: ${MARKPORT_IMAGEMAGICK:-true}
         INSTALL_FFMPEG: ${MARKPORT_FFMPEG:-true}
     image: markport:local
@@ -31,10 +33,13 @@ services:
       DEFAULT_VAULT_NAME: ${DEFAULT_VAULT_NAME:-Notes}
       VAULT_PATH: /data/vaults/${DEFAULT_VAULT_NAME:-Notes}
       WATCH_POLLING: ${WATCH_POLLING:-false}
-      # Real Node APIs for desktop-only plugins (Claudian). Lets anyone who
-      # can open the site run commands in this container - only with an
-      # authenticating reverse proxy in front. See the server README.
-      MARKPORT_NODE_BRIDGE: ${MARKPORT_NODE_BRIDGE:-false}
+      # Real Node APIs for desktop-only plugins (Claudian), for the browser
+      # app; native Obsidian never uses it. Empty = on when MARKPORT_PASSWORD
+      # is set (then only the signed-in owner can use it), off without one.
+      # true without a password lets anyone who can open the site run
+      # commands in this container - only with an authenticating reverse
+      # proxy in front. See the server README.
+      MARKPORT_NODE_BRIDGE: ${MARKPORT_NODE_BRIDGE:-}
       # Image library cache (thumbnails, previews, web-optimized 3D models),
       # in /data/media-cache - never inside a vault. Size cap in MB.
       MARKPORT_MEDIA_CACHE_MB: ${MARKPORT_MEDIA_CACHE_MB:-5120}

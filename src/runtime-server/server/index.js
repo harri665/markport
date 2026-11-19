@@ -309,7 +309,8 @@ function createApp(appConfig = {}) {
   app.use('/api/proxy-request', createProxyRouter());
   app.use('/api/vaults', createVaultsRouter(vaultRegistry, appConfig.vaultsDir));
   app.use('/api/node-bridge', createNodeBridgeRouter(vaultRegistry, appConfig.nodeBridge));
-  if (appConfig.nodeBridge) console.warn('[node-bridge] ENABLED - anyone who can reach this server can run commands on it as the server user. Keep it behind an authenticating reverse proxy.');
+  if (appConfig.nodeBridge && !appConfig.ownerPassword) console.warn('[node-bridge] ENABLED without MARKPORT_PASSWORD - anyone who can reach this server can run commands on it as the server user. Keep it behind an authenticating reverse proxy.');
+  else if (appConfig.nodeBridge) console.log('[node-bridge] enabled for the signed-in owner (desktop-only plugins run their Node code on this server)');
   app.use('/api/fs', createFsRouter(vaultRegistry, appConfig.vaultPath, {
     // Keep share links pointing at an item the owner renames or moves.
     onRename: (vaultId, oldPath, newPath) => sharing.shares.renamed(vaultId, oldPath, newPath),

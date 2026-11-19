@@ -123,3 +123,38 @@ test('cross-origin WebSocket is refused, /api/watch still upgrades', async (t) =
   await new Promise((r, j) => { watch.on('open', r); watch.on('error', j); });
   watch.close();
 });
+
+test('the bridge is on by default exactly when there is an owner login', () => {
+  const { nodeBridgeEnabled } = require('../config');
+  assert.equal(nodeBridgeEnabled({}), false, 'no password: anyone could use it');
+  assert.equal(nodeBridgeEnabled({ MARKPORT_PASSWORD: 'pw' }), true);
+  assert.equal(nodeBridgeEnabled({ MARKPORT_PASSWORD: 'pw', MARKPORT_NODE_BRIDGE: 'false' }), false);
+  assert.equal(nodeBridgeEnabled({ MARKPORT_NODE_BRIDGE: 'true' }), true, 'forced on, as before');
+  assert.equal(nodeBridgeEnabled({ MARKPORT_PASSWORD: 'pw', MARKPORT_NODE_BRIDGE: '' }), true, 'empty (docker compose) = unset');
+});
+
+test('with a password, only the signed-in owner reaches the bridge', async (t) => {
+  const tmp = await fsp.mkdtemp(path.join(os.tmpdir(), 'markport-bridge-owner-'));
+  const vaultPath = path.join(tmp, 'vault');
+  await fsp.mkdir(vaultPath, { recursive: true });
+  const app = createApp({
+    clientPath: path.join(tmp, 'c'), obsidianPath: path.join(tmp, 'o'),
+    registryPath: path.join(tmp, 'registry.json'), vaultPath, vaultsDir: null, nodeBridge: true, ownerPassword: 'pw',
+  });
+  const server = http.createServer(app);
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(async () => { await new Promise((r) => server.close(r)); await fsp.rm(tmp, { recursive: true, force: true }); });
+  const base = 'http://127.0.0.1:' + server.address().port;
+  const call = (headers) => fetch(base + '/api/node-bridge/call', {
+    method: 'POST', redirect: 'manual',
+    headers: Object.assign({ 'Content-Type': 'application/json', 'X-Markport-Bridge': '1' }, headers),
+    body: JSON.stringify({ mod: 'os', fn: 'platform', args: [] }),
+  });
+  const anon = await call({});
+  assert.ok(anon.status === 401 || anon.status === 403, 'refused without a login: ' + anon.status);
+  const { token } = await (await fetch(base + '/api/auth/token', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: 'pw' }),
+  })).json();
+  const owner = await call({ 'X-Markport-Token': token });
+  assert.equal(owner.status, 200);
+});

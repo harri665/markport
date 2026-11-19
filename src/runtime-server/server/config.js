@@ -14,6 +14,18 @@ const VAULT_BASE = '/vault';
 const crypto = require('crypto');
 const fsSync = require('fs');
 
+// The node bridge (api/node-bridge.js) runs plugins' Node code on this
+// server: remote code execution for whoever may use it. Only the owner may
+// (index.js: every /api route below ownerOnly), so it is on by default
+// exactly when there is an owner login, and off on a server without one,
+// where anyone who can open the site would get it. MARKPORT_NODE_BRIDGE=true
+// or =false overrides either way.
+function nodeBridgeEnabled(env) {
+  if (env.MARKPORT_NODE_BRIDGE === 'true') return true;
+  if (env.MARKPORT_NODE_BRIDGE === 'false') return false;
+  return !!env.MARKPORT_PASSWORD;
+}
+
 function parsePort(raw) {
   if (!raw) return 3500;
   const n = parseInt(raw, 10);
@@ -73,9 +85,11 @@ module.exports = {
   // and share links (/s/<id>) are the only way in without it. When empty,
   // there is no login - put an authenticating reverse proxy in front.
   ownerPassword: process.env.MARKPORT_PASSWORD || '',
-  // Real Node APIs for desktop-only plugins (api/node-bridge.js). Remote code
-  // execution by design - off unless explicitly enabled.
-  nodeBridge: process.env.MARKPORT_NODE_BRIDGE === 'true',
+  // Real Node APIs for desktop-only plugins (api/node-bridge.js), in the
+  // browser only: the native Obsidian app has Node of its own and never
+  // uses it. See nodeBridgeEnabled above for the default.
+  nodeBridge: nodeBridgeEnabled(process.env),
+  nodeBridgeEnabled,
   obsidianMobilePath: OBSIDIAN_MOBILE_PATH,
   clientMobilePath: CLIENT_MOBILE_PATH,
   projectRoot: PROJECT_ROOT,
