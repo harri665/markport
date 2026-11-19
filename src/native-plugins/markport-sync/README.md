@@ -59,7 +59,10 @@ In **Settings > Markport Sync**:
    one linked).
 
 Files already in a folder when you link it are merged with the server's, never deleted. The
-status bar shows `Markport: synced`, `syncing N` or `offline`; click it for the settings.
+status bar shows `Markport: synced`, `syncing` or `offline`, with `(!)` after it when something went
+wrong. Click it for the details: what each linked vault is doing right now, the progress of a large
+upload (size, speed, time left), videos the server is still re-encoding, the last full check and
+the last error, with **Sync now**, **Reconnect** and **Settings**.
 
 Commands: **Sync now** (compare everything right away) and **Reconnect to the server**.
 
@@ -104,8 +107,7 @@ what arrives without a reload.
 ## Large files and videos
 
 A file bigger than 8 MB is uploaded in pieces, so a reverse proxy's limit on the size of one
-request (Cloudflare: 100 MB) doesn't stop it. The status bar shows the progress
-(`Markport: uploading call.mp4 42%`). On desktop the file is read from disk piece by piece, so
+request (Cloudflare: 100 MB) doesn't stop it. Click the status bar to see the progress. On desktop the file is read from disk piece by piece, so
 it doesn't have to fit in memory.
 
 **Re-encode large videos** (off by default) has the server re-encode a video larger than the size

@@ -430,14 +430,16 @@ class LinkSync {
     this.stopped = false;
     this.status = 'connecting';
     this.lastError = '';
+    this.lastErrorAt = 0;
     this.lastFullSync = 0;
+    this.active = new Map();   // rel → what is being done with it right now
   }
 
   // ── plumbing ──
 
   setStatus(status, error) {
     this.status = status;
-    if (error !== undefined) this.lastError = error;
+    if (error !== undefined) { this.lastError = error; this.lastErrorAt = error ? Date.now() : 0; }
     this.plugin.refreshStatus();
   }
 
@@ -708,10 +710,18 @@ class LinkSync {
     let finished;
     try {
       const start = await media('POST', 'start', { json: { vault: this.vaultId, path: rel, size: local.size, overwrite: true, reencode } });
-      const step = start.chunk > 0 ? start.chunk : caps.uploadChunk;
-      for (let offset = 0; offset < local.size; offset += step) {
-        this.plugin.setProgress(this, name, offset / local.size);
+      // Pieces sized to take a few seconds each, so the progress moves on a
+      // slow connection and a fast one isn't held back by small requests.
+      const maxStep = start.chunk > 0 ? start.chunk : caps.uploadChunk;
+      let step = Math.min(maxStep, MB);
+      const began = Date.now();
+      for (let offset = 0; offset < local.size;) {
+        const secs = (Date.now() - began) / 1000;
+        this.plugin.setProgress(this, name, offset / local.size, {
+          rel, sent: offset, size: local.size, reencode, rate: secs > 1 ? offset / secs : 0,
+        });
         const body = await reader.read(offset, Math.min(step, local.size - offset));
+        const t0 = Date.now();
         for (let attempt = 1; ; attempt++) {
           try {
             await media('PUT', 'chunk', { query: { id: start.id, offset }, body, contentType: 'application/octet-stream' });
@@ -723,6 +733,11 @@ class LinkSync {
             await new Promise((r) => setTimeout(r, 1000 * attempt));
           }
         }
+        offset += body.byteLength;
+        if (!body.byteLength) throw new Error(name + ' changed while it was uploaded');
+        const took = Date.now() - t0;
+        if (took < 2000) step = Math.min(maxStep, step * 2);
+        else if (took > 8000) step = Math.max(256 * 1024, Math.floor(step / 2));
       }
       finished = await media('POST', 'finish', { json: { id: start.id } });
     } finally {
@@ -749,6 +764,18 @@ class LinkSync {
   // ── applying one decision ──
 
   async apply(rel, action, local, remote) {
+    if (action === 'none') return;
+    this.active.set(rel, action);
+    this.plugin.refreshStatus();
+    try {
+      await this.applyAction(rel, action, local, remote);
+    } finally {
+      this.active.delete(rel);
+      this.plugin.refreshStatus();
+    }
+  }
+
+  async applyAction(rel, action, local, remote) {
     const st = this.state;
     switch (action) {
       case 'none':
@@ -861,6 +888,9 @@ class LinkSync {
 
   async reconcile(prefix) {
     prefix = prefix || '';
+    // A full comparison retries whatever failed before: start it clean, so
+    // an error that is shown is one that still happens.
+    if (!prefix && this.lastError) this.setStatus(this.status, '');
     if (this.folder && !prefix) await this.ensureFolder(this.folder);
     const tree = await this.api('GET', 'tree', { query: { path: prefix } });
     const remoteFiles = new Map(tree.files.map((f) => [f.path, f]));
@@ -1365,6 +1395,137 @@ class LinkSync {
 
 // ── Mass-delete confirmation ────────────────────────────────────────────────
 
+function formatBytes(n) {
+  if (n >= 1024 * MB) return (n / (1024 * MB)).toFixed(2) + ' GB';
+  if (n >= MB) return (n / MB).toFixed(n >= 100 * MB ? 0 : 1) + ' MB';
+  return Math.max(1, Math.round(n / 1024)) + ' KB';
+}
+
+function formatDuration(secs) {
+  if (!(secs > 0) || !isFinite(secs)) return '';
+  if (secs < 60) return 'less than a minute';
+  if (secs < 3600) return Math.round(secs / 60) + ' min';
+  return Math.floor(secs / 3600) + ' h ' + Math.round((secs % 3600) / 60) + ' min';
+}
+
+const ACTION_WORDS = {
+  upload: 'Uploading', download: 'Downloading', compare: 'Comparing', 'delete-local': 'Deleting here',
+  'delete-remote': 'Deleting on the server', adopt: 'Checking', 'await-encode': 'Checking', forget: 'Checking',
+};
+
+// What a click on the status bar opens: what every link is doing right now,
+// what went wrong last, and the two things one usually wants next.
+class StatusModal extends obsidian.Modal {
+  constructor(app, plugin) {
+    super(app);
+    this.plugin = plugin;
+    this.timer = null;
+    this.drawTimer = null;
+  }
+
+  onOpen() {
+    this.titleEl.setText('Markport Sync');
+    this.plugin.statusModal = this;
+    this.bodyEl = this.contentEl.createDiv();
+    new obsidian.Setting(this.contentEl)
+      .addButton((b) => b.setButtonText('Sync now').setCta().onClick(() => { this.plugin.syncAll(); this.draw(); }))
+      .addButton((b) => b.setButtonText('Reconnect').onClick(() => { this.plugin.restartLinks(); this.draw(); }))
+      .addButton((b) => b.setButtonText('Settings').onClick(() => { this.close(); this.plugin.openSettings(); }));
+    this.draw();
+    // Keeps "x minutes ago" and the speed fresh while nothing else changes.
+    this.timer = window.setInterval(() => this.draw(), 2000);
+  }
+
+  // Called on every status change; many can arrive at once.
+  changed() {
+    if (this.drawTimer) return;
+    this.drawTimer = window.setTimeout(() => { this.drawTimer = null; this.draw(); }, 200);
+  }
+
+  line(el, label, text, cls) {
+    const row = el.createDiv({ cls: 'markport-sync-row' });
+    row.style.display = 'flex';
+    row.style.gap = '0.75em';
+    row.style.margin = '0.2em 0';
+    const l = row.createDiv({ text: label });
+    l.style.flex = '0 0 7em';
+    l.style.color = 'var(--text-muted)';
+    const v = row.createDiv({ text });
+    v.style.flex = '1';
+    v.style.wordBreak = 'break-word';
+    if (cls === 'error') v.style.color = 'var(--text-error)';
+    if (cls === 'ok') v.style.color = 'var(--text-success)';
+    return v;
+  }
+
+  draw() {
+    const el = this.bodyEl;
+    if (!el) return;
+    const plugin = this.plugin;
+    const s = plugin.settings;
+    el.empty();
+    const links = [...plugin.links.values()];
+    if (!s.serverUrl || !links.length) {
+      el.createEl('p', { text: 'Not set up yet. Open the settings, enter your server and link a vault.' });
+      return;
+    }
+    this.line(el, 'Server', s.serverUrl);
+    if (plugin.authFailed) this.line(el, 'Sign-in', 'The server wants a sign-in. Open the settings and sign in again.', 'error');
+
+    for (const l of links) {
+      el.createEl('h4', { text: l.link.name + (l.folder ? '  →  ' + l.folder : '') });
+      const up = plugin.progress.get(l);
+      const encoding = Object.keys(l.state.files).filter((r) => l.state.files[r].enc);
+      const busy = l.pendingOps > 0;
+      const state = l.status !== 'live' ? (l.status === 'connecting' ? 'Connecting…' : l.status === 'sign-in needed' ? 'Sign-in needed' : 'Offline')
+        : busy ? 'Syncing' : 'Up to date';
+      this.line(el, 'Status', state, l.status !== 'live' ? 'error' : busy ? '' : 'ok');
+
+      if (up) {
+        const left = up.rate > 0 ? formatDuration((up.size - up.sent) / up.rate) : '';
+        const v = this.line(el, 'Uploading', up.name);
+        const bar = v.createEl('progress');
+        bar.max = 1;
+        bar.value = up.fraction;
+        bar.style.width = '100%';
+        bar.style.display = 'block';
+        bar.style.margin = '0.3em 0';
+        v.createDiv({
+          text: Math.floor(up.fraction * 100) + '%  ·  ' + formatBytes(up.sent) + ' of ' + formatBytes(up.size) +
+            (up.rate > 0 ? '  ·  ' + formatBytes(up.rate) + '/s' : '') + (left ? '  ·  about ' + left + ' left' : ''),
+        });
+        if (up.reencode) v.createDiv({ text: 'The server will re-encode it once it has arrived.' }).style.color = 'var(--text-muted)';
+      }
+      const doing = [...l.active].filter(([rel]) => !(up && up.rel === rel));
+      if (doing.length) {
+        const v = this.line(el, 'Now', '');
+        for (const [rel, action] of doing.slice(0, 6)) v.createDiv({ text: (ACTION_WORDS[action] || action) + ' ' + rel });
+        if (doing.length > 6) v.createDiv({ text: '… and ' + (doing.length - 6) + ' more' });
+      } else if (busy && !up) {
+        this.line(el, 'Now', 'Comparing with the server…');
+      }
+      if (encoding.length) {
+        const v = this.line(el, 'On the server', 'Re-encoding ' + encoding.length + (encoding.length === 1 ? ' video' : ' videos') + ' (your original stays here):');
+        for (const rel of encoding.slice(0, 6)) v.createDiv({ text: rel });
+      }
+      this.line(el, 'Last check', l.lastFullSync ? new Date(l.lastFullSync).toLocaleTimeString() : 'not yet');
+      if (l.lastError) {
+        const v = this.line(el, 'Last error', l.lastError, 'error');
+        if (l.lastErrorAt) v.createDiv({ text: 'at ' + new Date(l.lastErrorAt).toLocaleTimeString() }).style.color = 'var(--text-muted)';
+        const clear = v.createEl('a', { text: 'Dismiss' });
+        clear.onclick = () => { l.setStatus(l.status, ''); };
+      }
+    }
+  }
+
+  onClose() {
+    window.clearInterval(this.timer);
+    window.clearTimeout(this.drawTimer);
+    if (this.plugin.statusModal === this) this.plugin.statusModal = null;
+    this.contentEl.empty();
+  }
+}
+
 class ConfirmDeletesModal extends obsidian.Modal {
   constructor(app, link, deletes, resolve) {
     super(app);
@@ -1424,7 +1585,9 @@ class MarkportSyncPlugin extends obsidian.Plugin {
 
     this.statusEl = this.addStatusBarItem();
     this.statusEl.addClass('markport-sync-status');
-    this.statusEl.onClickEvent(() => this.openSettings());
+    if (this.statusEl.setAttribute) this.statusEl.setAttribute('aria-label', 'Markport Sync: click for details');
+    this.statusEl.onClickEvent(() => new StatusModal(this.app, this).open());
+    this.addCommand({ id: 'status', name: 'Show sync status', callback: () => new StatusModal(this.app, this).open() });
     this.addSettingTab(new MarkportSyncSettingTab(this.app, this));
 
     this.addCommand({ id: 'sync-now', name: 'Sync now', callback: () => this.syncAll() });
@@ -1642,21 +1805,22 @@ class MarkportSyncPlugin extends obsidian.Plugin {
     else {
       const pending = all.reduce((n, l) => n + l.pendingOps, 0);
       const offline = all.filter((l) => l.status !== 'live').length;
-      const up = [...this.progress.values()][0];
-      if (up) text = 'Markport: uploading ' + up.name + ' ' + Math.floor(up.fraction * 100) + '%' + (pending > 1 ? ' (+' + (pending - 1) + ')' : '');
-      else if (pending) text = 'Markport: syncing ' + pending;
+      if (pending) text = 'Markport: syncing';
       else if (offline === all.length) text = 'Markport: offline';
       else if (offline) text = 'Markport: ' + (all.length - offline) + '/' + all.length + ' live';
       else text = 'Markport: synced';
     }
+    // The details, errors included, are in the panel a click opens.
+    if (all.some((l) => l.lastError) && !this.authFailed) text += ' (!)';
     this.statusEl.setText(text);
+    if (this.statusModal) this.statusModal.changed();
     if (this.settingTab && this.settingTab.refreshStatusLines) this.settingTab.refreshStatusLines();
   }
 
   // A large upload in progress, for the status bar. name null = done.
-  setProgress(link, name, fraction) {
+  setProgress(link, name, fraction, more) {
     if (name == null) this.progress.delete(link);
-    else this.progress.set(link, { name, fraction });
+    else this.progress.set(link, Object.assign({ name, fraction }, more));
     this.refreshStatus();
   }
 
