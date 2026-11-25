@@ -162,46 +162,59 @@ shared network). Set `MARKPORT_PASSWORD`, or protect the hostname with a Cloudfl
 Access policy (share links then need an Access bypass rule for `/s/*` and the app's
 files, so the password is simpler). WebSockets work through tunnels without extra settings.
 
-## Connecting Claude
+## Connecting MCP clients
 
-The server has an MCP endpoint at `/mcp`, so Claude (on claude.ai, the desktop app or Claude
-Code) can read, search and change your vaults. It needs `MARKPORT_PASSWORD`: you sign Claude in
-with it.
+The server exposes an MCP endpoint at `/mcp`. Claude, ChatGPT and Gemini can use it to
+read, search and change your vaults. Sign-in requires `MARKPORT_PASSWORD`.
 
-1. On claude.ai, open **Customize > Connectors**, click **+ Add**, then **Add custom
-   connector**. On a Team or Enterprise plan an owner adds it under **Organization settings >
-   Connectors** first.
-2. Enter a name and the URL `https://<your host>/mcp`, and keep the sign-in settings Claude
-   detects.
-3. Click **Connect**. A Markport page says that Claude wants access and that you go back to
-   claude.ai. Enter your Markport password and click **Allow**.
-4. In a chat, turn the connector on with **+ > Connectors**.
+### Claude
 
-For Claude Code: `claude mcp add --transport http markport https://<your host>/mcp`, then
+1. On claude.ai, open **Customize > Connectors**, then **+ Add > Add custom connector**.
+2. Enter `https://<your host>/mcp` and keep the OAuth settings Claude detects.
+3. Select **Connect**. On the Markport consent page, enter your Markport password and allow access.
+4. Enable the connector in a chat with **+ > Connectors**.
+
+For Claude Code: `claude mcp add --transport http markport https://<your host>/mcp`, then run
 `/mcp` in Claude Code to sign in.
 
-What Claude can do: list vaults and files, read notes (and images), search, write, edit, append,
-create folders, move, copy and delete. Delete moves things into the vault's `.trash/`, as
-Obsidian does. Every change goes through the same file API as the app, so open Obsidian sessions
-show it at once.
+### ChatGPT
 
-Sign-in details:
+In ChatGPT on the web, open **Plugins**, choose **+ > Add custom MCP server**, and enter
+`https://<your host>/mcp`. Choose OAuth, complete the Markport consent flow, then scan and
+add the server. Custom MCP availability and write access depend on the ChatGPT plan and
+workspace permissions.
 
-- Claude gets an access token for an hour and a refresh token for 90 days, renewed each time it
-  is used. Only the newest refresh token works.
-- **Connected apps** are listed at `/oauth/connections`. **Disconnect** there signs one out at
-  once. Changing `MARKPORT_PASSWORD` signs every app out.
-- The sign-in only sends the browser back to `MARKPORT_OAUTH_REDIRECT_HOSTS` (claude.ai and
-  claude.com) or to the computer you're on. A link from someone else can't send the code to
-  their site, even if you type your password.
-- Behind a proxy, Markport works out its own address from the `Host` header and
-  `X-Forwarded-Proto`. If sign-in fails with a wrong address (`http://` or an internal host
-  name), set `MARKPORT_PUBLIC_URL`.
-- If your proxy only lets in certain visitors, `/mcp`, `/oauth/*` and `/.well-known/oauth-*`
-  must be reachable from Anthropic's servers.
+### Gemini Apps
 
-Instructions for Claude, such as how you name notes, go in `/data/mcp-instructions.md`. Claude
-gets them each time it connects, and edits apply without a restart.
+In the Gemini web app, open **Settings & help > Connected apps**, then add a custom app with
+the URL `https://<your host>/mcp`. Follow the OAuth consent flow. Google currently requires
+a personal Google Account, US availability and Gemini Apps Activity/history enabled for
+custom apps.
+
+### Gemini CLI
+
+Gemini CLI can discover the OAuth configuration and register a client dynamically. Add
+`https://<your host>/mcp` as a remote HTTP MCP server and run `/mcp auth <server-name>`.
+Its OAuth callback uses localhost, which Markport allows automatically.
+
+### Access and sign-in details
+
+These clients can list vaults and files, read notes and images, search, write, edit, append,
+create folders, move, copy and delete. Delete moves items to the vault's `.trash/`. Treat
+connection approval as access to every Markport vault, and review tool actions before using them.
+
+- The access token lasts one hour. Refresh tokens last 90 days and rotate; only the newest
+  refresh token works.
+- **Connected apps** are listed at `/oauth/connections`; disconnecting there revokes access
+  immediately. Changing `MARKPORT_PASSWORD` signs every app out.
+- Redirects are limited to `MARKPORT_OAUTH_REDIRECT_HOSTS` plus loopback. CIMD client
+  metadata is fetched only from `MARKPORT_OAUTH_CLIENT_HOSTS`.
+- Behind a proxy, Markport infers its public URL from `Host` and `X-Forwarded-Proto`.
+  Set `MARKPORT_PUBLIC_URL` if OAuth discovery advertises the wrong address.
+- The MCP endpoint, OAuth endpoints and `/.well-known/oauth-*` must be reachable by the
+  connected client. If your proxy restricts visitors, allow the relevant service there.
+- Additional instructions for MCP clients go in `/data/mcp-instructions.md`; edits apply
+  without a restart.
 
 ## Settings (`.env`)
 
@@ -217,10 +230,10 @@ gets them each time it connects, and edits apply without a restart.
 | `MARKPORT_NODE_BRIDGE` | *(on with a password)* | desktop-only plugins run their Node code in the container when you use the browser app. Unset: on when `MARKPORT_PASSWORD` is set, off without one. `false`: off. `true`: on regardless. See below |
 | `INSTALL_CLAUDE_CODE` | *(follows the bridge)* | build the image with Claude Code, for Claudian; `false` leaves it out |
 | `MARKPORT_MEDIA_CACHE_MB` | `5120` | size cap of the image library's cache (`/data/media-cache`): thumbnails, previews and web-optimized 3D models. Never inside a vault; safe to delete |
-| `MARKPORT_MCP` | `true` | the MCP endpoint at `/mcp` (needs `MARKPORT_PASSWORD`). See [Connecting Claude](#connecting-claude) |
+| `MARKPORT_MCP` | `true` | the MCP endpoint at `/mcp` (needs `MARKPORT_PASSWORD`). See [Connecting MCP clients](#connecting-mcp-clients) |
 | `MARKPORT_PUBLIC_URL` | *(from each request)* | the address apps reach the server at, e.g. `https://notes.example.com` |
-| `MARKPORT_OAUTH_REDIRECT_HOSTS` | `claude.ai,claude.com` | where the sign-in may send the browser back to; loopback is always allowed |
-| `MARKPORT_OAUTH_CLIENT_HOSTS` | `claude.ai,claude.com,anthropic.com` | hosts an app's client id may point to (a client metadata document) |
+| `MARKPORT_OAUTH_REDIRECT_HOSTS` | `claude.ai,claude.com,chatgpt.com,oauth-redirect.googleusercontent.com,oauth-redirect-sandbox.googleusercontent.com,oauth-redirect-test.googleusercontent.com` | allowed OAuth callback hosts; loopback is always allowed |
+| `MARKPORT_OAUTH_CLIENT_HOSTS` | `claude.ai,claude.com,anthropic.com,chatgpt.com,accountlinking.google.com` | hosts an app's OAuth client metadata document may come from |
 | `MARKPORT_MCP_PLAIN_PUNCTUATION` | `false` | `true`: refuse writes through MCP that add em/en dashes or emoji to notes |
 | `MARKPORT_MCP_INSTRUCTIONS_FILE` | `/data/mcp-instructions.md` | instructions sent to the app when it connects |
 | `MARKPORT_MCP_DEFAULT_VAULT` | *(none)* | with several vaults: the one (name or id) the app uses when it names none. Without it every call has to name a vault |
