@@ -23,9 +23,9 @@
  * app out at once. Changing the password signs every app out.
  *
  * Where the browser may be sent back to is limited to MARKPORT_OAUTH_REDIRECT_HOSTS
- * (default claude.ai, claude.com) plus loopback addresses (apps running on
- * the owner's own computer), so a link made by someone else can't send a
- * code to their site even if the owner types the password.
+ * (Claude, ChatGPT and Gemini's documented callback hosts) plus loopback
+ * addresses (apps running on the owner's own computer), so unrelated links
+ * can't send codes elsewhere even if the owner types the password.
  */
 
 'use strict';
@@ -121,8 +121,8 @@ class GrantStore {
 function createOAuth(opts) {
   const { auth } = opts;
   const grants = new GrantStore(path.join(opts.dataDir, 'oauth-grants.json'));
-  const redirectHosts = hostList(opts.redirectHosts, 'claude.ai,claude.com');
-  const cimdHosts = hostList(opts.cimdHosts, 'claude.ai,claude.com,anthropic.com');
+  const redirectHosts = hostList(opts.redirectHosts, 'claude.ai,claude.com,chatgpt.com,oauth-redirect.googleusercontent.com,oauth-redirect-sandbox.googleusercontent.com,oauth-redirect-test.googleusercontent.com');
+  const cimdHosts = hostList(opts.cimdHosts, 'claude.ai,claude.com,anthropic.com,chatgpt.com,accountlinking.google.com');
   const doFetch = opts.fetch || fetch;
   const usedCodes = new Map();   // code id -> expiry
   const cimdCache = new Map();   // url -> { at, client }
